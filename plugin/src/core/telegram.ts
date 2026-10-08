@@ -1,12 +1,18 @@
-// Builds the Telegram message (HTML parse mode). Same fields as the old
-// notify-telegram.sh, plus duration, model, effort, cost and branch.
+// Builds the Telegram message (HTML parse mode), in English or Traditional
+// Chinese: project, branch, time, duration, model, effort, cost, limits,
+// context, a summary of the reply and the session id.
 
 import { compactDuration, modelLabel, msUntil, preciseDuration, usd } from './format'
 
 export type NotifyKind = 'done' | 'permission' | 'failure' | 'test'
 
+export type NotifyLanguage = 'en' | 'zh-TW'
+
+export type LanguageChoice = 'auto' | NotifyLanguage
+
 export type NotifyFacts = {
   kind: NotifyKind
+  language: NotifyLanguage
   project: string
   branch?: string
   time: string
@@ -23,21 +29,69 @@ export type NotifyFacts = {
   sessionTitle?: string
 }
 
-const TITLES: Record<NotifyKind, string> = {
-  done: '✅ Claude Code 完成回覆',
-  permission: '⚠️ Claude Code 需要你的確認',
-  failure: '❌ Claude Code 回覆失敗',
-  test: '🧪 hudcade 測試通知',
+type Strings = {
+  titles: Record<NotifyKind, string>
+  project: string
+  topic: string
+  time: string
+  took: string
+  error: string
+  details: string
+  summary: string
+  session: string
+}
+
+const STRINGS: Record<NotifyLanguage, Strings> = {
+  en: {
+    titles: {
+      done: '✅ Claude Code is done',
+      permission: '⚠️ Claude Code needs your approval',
+      failure: '❌ Claude Code turn failed',
+      test: '🧪 hudcade test notification',
+    },
+    project: 'Project: ',
+    topic: 'Topic: ',
+    time: 'Time: ',
+    took: 'Took',
+    error: 'Error: ',
+    details: 'Details: ',
+    summary: 'Summary: ',
+    session: 'Session: ',
+  },
+  'zh-TW': {
+    titles: {
+      done: '✅ Claude Code 完成回覆',
+      permission: '⚠️ Claude Code 需要你的確認',
+      failure: '❌ Claude Code 回覆失敗',
+      test: '🧪 hudcade 測試通知',
+    },
+    project: '專案：',
+    topic: '主題：',
+    time: '時間：',
+    took: '耗時',
+    error: '錯誤：',
+    details: '內容：',
+    summary: '摘要：',
+    session: 'Session：',
+  },
+}
+
+// `auto` follows Claude Code's own `language` setting: Chinese there means
+// Traditional Chinese messages, anything else English.
+export function resolveLanguage(choice: LanguageChoice, settingsLanguage: unknown): NotifyLanguage {
+  if (choice !== 'auto') return choice
+  return typeof settingsLanguage === 'string' && /中文|chinese|^zh/i.test(settingsLanguage.trim()) ? 'zh-TW' : 'en'
 }
 
 export function buildMessage(f: NotifyFacts): string {
-  const lines = [`<b>${TITLES[f.kind]}</b>`]
-  lines.push(`專案：<code>${esc(f.project)}</code>${f.branch ? ` (${esc(f.branch)})` : ''}`)
-  if (f.sessionTitle) lines.push(`主題：${esc(f.sessionTitle)}`)
-  lines.push(`時間：${esc(f.time)}`)
+  const s = STRINGS[f.language]
+  const lines = [`<b>${s.titles[f.kind]}</b>`]
+  lines.push(`${s.project}<code>${esc(f.project)}</code>${f.branch ? ` (${esc(f.branch)})` : ''}`)
+  if (f.sessionTitle) lines.push(`${s.topic}${esc(f.sessionTitle)}`)
+  lines.push(`${s.time}${esc(f.time)}`)
 
   const run = [
-    f.durationMs !== undefined ? `耗時 ${preciseDuration(f.durationMs)}` : undefined,
+    f.durationMs !== undefined ? `${s.took} ${preciseDuration(f.durationMs)}` : undefined,
     modelLabel(f.model),
     f.effort,
     f.costUsd !== undefined ? usd(f.costUsd) : undefined,
@@ -47,9 +101,9 @@ export function buildMessage(f: NotifyFacts): string {
   const stats = statsLine(f)
   if (stats) lines.push(esc(stats))
 
-  if (f.detail) lines.push(`${f.kind === 'failure' ? '錯誤' : '內容'}：${esc(f.detail)}`)
-  if (f.summary) lines.push(`摘要：${esc(f.summary)}`)
-  if (f.sessionId) lines.push(`Session：<code>${esc(f.sessionId.slice(0, 8))}</code>`)
+  if (f.detail) lines.push(`${f.kind === 'failure' ? s.error : s.details}${esc(f.detail)}`)
+  if (f.summary) lines.push(`${s.summary}${esc(f.summary)}`)
+  if (f.sessionId) lines.push(`${s.session}<code>${esc(f.sessionId.slice(0, 8))}</code>`)
   return lines.join('\n')
 }
 

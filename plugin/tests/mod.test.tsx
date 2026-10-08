@@ -114,7 +114,7 @@ describe('spinner', () => {
 })
 
 describe('notify', () => {
-  const OPTIONS = { options: { telegramBotToken: 'BOT-TOKEN', telegramChatId: '42' } }
+  const OPTIONS = { options: { telegramBotToken: 'BOT-TOKEN', telegramChatId: '42', notifyLanguage: 'zh-TW' } }
 
   // The session facts a message reads, answered as the engine would.
   function session(on: On): void {
@@ -157,6 +157,24 @@ describe('notify', () => {
     expect(body.text).toContain('專案：<code>claude-mods</code>')
     expect(body.text).toContain('5h:13% ctx:9%')
     expect(body.text).toContain('時間：2026-10-08 18:00:00 CST')
+  })
+
+  test('on auto, the message follows Claude Code’s language setting', { options: { telegramBotToken: 'T', telegramChatId: '1' } }, async ($, on) => {
+    const clock = mock.clock(on)
+    session(on)
+    on('settings.read', () => ({ value: { language: 'English' } }) as never)
+    const sent: string[] = []
+    on('http.fetch', (_$, e) => {
+      sent.push(e.init?.body ?? '')
+      return { value: { status: 200, ok: true, headers: {}, text: '' } }
+    })
+    on('turn.complete', (_$, e) => ({ text: e.answer }) as never)
+
+    await $.turn.complete({ answer: 'Done.', durationMs: 5_000, isAborted: false, turnId: 't', reason: 'answer' } as never)
+    for (let i = 0; i < 20 && sent.length === 0; i++) await clock.advance(10)
+    const text = (JSON.parse(sent[0]!) as { text: string }).text
+    expect(text).toContain('✅ Claude Code is done')
+    expect(text).toContain('Summary: Done.')
   })
 
   test('subagent turns and aborted turns stay quiet', OPTIONS, async ($, on) => {

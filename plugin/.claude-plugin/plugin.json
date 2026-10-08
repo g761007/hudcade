@@ -73,7 +73,18 @@
       "type": "string",
       "title": "Notify: blocked projects",
       "description": "Space-separated project folder names that never notify.",
-      "default": "observer-sessions"
+      "default": ""
+    },
+    "notifyLanguage": {
+      "type": "string",
+      "title": "Notify: language",
+      "description": "Language of the Telegram messages; auto follows Claude Code's language setting (Chinese there means Traditional Chinese, anything else English).",
+      "options": [
+        "auto",
+        "en",
+        "zh-TW"
+      ],
+      "default": "auto"
     },
     "telegramBotToken": {
       "type": "string",

@@ -31,7 +31,7 @@ import {
   taskCreated,
   taskUpdated,
 } from '../src/core/hud-model'
-import { buildMessage, summarize } from '../src/core/telegram'
+import { buildMessage, resolveLanguage, summarize, type NotifyFacts } from '../src/core/telegram'
 
 describe('format', () => {
   test('durations read the way the band and messages show them', () => {
@@ -85,6 +85,15 @@ describe('format', () => {
 })
 
 describe('config', () => {
+  test('out of the box nothing is blocklisted and the message language follows Claude Code', () => {
+    const { config } = resolveConfig({}, [])
+    expect(config.notifyBlocklist).toEqual([])
+    expect(config.notifyLanguage).toBe('auto')
+    const bad = resolveConfig({ notifyLanguage: 'fr' }, [])
+    expect(bad.config.notifyLanguage).toBe('auto')
+    expect(bad.warnings).toHaveLength(1)
+  })
+
   test('defaults, then userConfig, then project files', () => {
     const { config, warnings } = resolveConfig({ spinnerScene: 'rocket', notifyMinTurnSeconds: 10 }, [
       { source: '.claude/claude-mods.json', values: { notify: false, notifyBlocklist: 'a b' } },
@@ -329,9 +338,48 @@ describe('band', () => {
 })
 
 describe('telegram', () => {
-  test('keeps the old fields and escapes HTML', () => {
+  const FACTS: NotifyFacts = {
+    kind: 'done',
+    language: 'en',
+    project: 'a<b>',
+    branch: 'main',
+    time: '2026-10-08 12:00:00 CST',
+    now: 0,
+    durationMs: 134_000,
+    model: 'claude-opus-5-5',
+    effort: 'xhigh',
+    costUsd: 0.43,
+    ctxPercent: 9,
+    rates: [{ kind: 'five_hour', percent: 13, resetsAt: '8100' }, { kind: 'seven_day', percent: 38 }],
+    summary: 'done & dusted',
+    sessionId: '11fa1a35-c235',
+  }
+
+  test('English messages carry every field and escape HTML', () => {
+    const text = buildMessage(FACTS)
+    expect(text).toContain('<b>✅ Claude Code is done</b>')
+    expect(text).toContain('Project: <code>a&lt;b&gt;</code> (main)')
+    expect(text).toContain('Time: 2026-10-08 12:00:00 CST')
+    expect(text).toContain('Took 2m14s · Opus 5.5 · xhigh · $0.43')
+    expect(text).toContain('5h:13%(2h15m) wk:38% ctx:9%(opus)')
+    expect(text).toContain('Summary: done &amp; dusted')
+    expect(text).toContain('Session: <code>11fa1a35</code>')
+    expect(buildMessage({ ...FACTS, kind: 'failure', summary: undefined, detail: 'rate_limit' })).toContain('Error: rate_limit')
+  })
+
+  test('auto follows Claude Code’s language setting', () => {
+    expect(resolveLanguage('auto', '繁體中文')).toBe('zh-TW')
+    expect(resolveLanguage('auto', 'Traditional Chinese')).toBe('zh-TW')
+    expect(resolveLanguage('auto', 'zh-TW')).toBe('zh-TW')
+    expect(resolveLanguage('auto', 'English')).toBe('en')
+    expect(resolveLanguage('auto', undefined)).toBe('en')
+    expect(resolveLanguage('en', '繁體中文')).toBe('en')
+  })
+
+  test('Traditional Chinese messages keep the old hook’s fields', () => {
     const text = buildMessage({
       kind: 'done',
+      language: 'zh-TW',
       project: 'a<b>',
       branch: 'main',
       time: '2026-10-08 12:00:00 CST',

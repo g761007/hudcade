@@ -43,7 +43,7 @@ import {
   withDefaults,
   type UsageInput,
 } from '../src/core/hud-model'
-import { buildMessage, summarize, type NotifyKind } from '../src/core/telegram'
+import { buildMessage, resolveLanguage, summarize, type NotifyKind } from '../src/core/telegram'
 
 // The one session value the drawings read: a write redraws the band and the spinner.
 const hudAtom = atom({ plugin: 'hudcade', key: 'hud' } as const, emptyHud(''))
@@ -246,8 +246,17 @@ async function notify($: EngineInterface, kind: NotifyKind, extra: NotifyExtra):
     $.clock.now(),
     localTime($),
   ])
+  let settingsLanguage: unknown
+  if (config.notifyLanguage === 'auto') {
+    try {
+      settingsLanguage = ((await $.settings.read()) as Record<string, unknown>).language
+    } catch {
+      // Unreadable settings: English.
+    }
+  }
   const text = buildMessage({
     kind,
+    language: resolveLanguage(config.notifyLanguage, settingsLanguage),
     project,
     branch: h.git?.branch,
     time,
@@ -703,9 +712,9 @@ function statusText(runtime: Runtime, hud: Hud): string {
     `modules: hud ${onOff(config.hud)} · status line ${onOff(config.statusLine)} · spinner ${onOff(config.spinner)} (${config.spinnerScene}) · notify ${onOff(config.notify)}`,
     `context thresholds: warn ${config.ctxWarnPercent}% · critical ${config.ctxCriticalPercent}%`,
     `config sources: ${runtime.sources.join(', ')}`,
-    `telegram: ${runtime.telegramSource ? `configured (${runtime.telegramSource})` : 'not configured'}`,
+    `telegram: ${runtime.telegramSource ? `configured (${runtime.telegramSource})` : 'not configured'} · language ${config.notifyLanguage}`,
     `hud data: project=${hud.project || '—'} · model=${hud.model ?? '—'} · effort=${hud.effort ?? '—'} · turn=${hud.turn.count} (${hud.turn.status})`,
-    `          ctx=${hud.ctx ? `${hud.ctx.percent ?? '?'}% of ${hud.ctx.window}` : '— (no reading yet)'} · rate limits=${hud.rates.length} · cost=${hud.costUsd ?? '—'}`,
+    `          ctx=${hud.ctx ? `${hud.ctx.percent ?? '?'}% of ${hud.ctx.window}` : '— (no reading yet)'} · rate limits=${hud.rates.length} · cost=${hud.costUsd !== undefined ? usd(hud.costUsd) : '—'}`,
     `          git=${hud.git ? hud.git.branch : `— (${gitNote})`} · tools=${hud.tools.total} · agents=${hud.agents.length} · tasks=${hud.tasks.length}`,
   ]
   if (runtime.warnings.length > 0) lines.push('warnings:', ...runtime.warnings.map(w => `  - ${w}`))

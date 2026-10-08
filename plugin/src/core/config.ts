@@ -3,6 +3,7 @@
 
 import type { SceneName } from '../../types'
 import { SCENE_NAMES } from './scenes'
+import type { LanguageChoice } from './telegram'
 
 export type SceneChoice = 'random' | SceneName
 
@@ -16,6 +17,7 @@ export type ModsConfig = {
   notify: boolean
   notifyMinTurnSeconds: number
   notifyBlocklist: string[]
+  notifyLanguage: LanguageChoice
   telegramBotToken?: string
   telegramChatId?: string
 }
@@ -29,7 +31,8 @@ export const DEFAULTS: ModsConfig = {
   ctxCriticalPercent: 80,
   notify: true,
   notifyMinTurnSeconds: 0,
-  notifyBlocklist: ['observer-sessions'],
+  notifyBlocklist: [],
+  notifyLanguage: 'auto',
 }
 
 const SCENE_CHOICES: readonly SceneChoice[] = ['random', ...SCENE_NAMES]
@@ -45,6 +48,7 @@ const PROJECT_KEYS = [
   'notify',
   'notifyMinTurnSeconds',
   'notifyBlocklist',
+  'notifyLanguage',
 ] as const
 
 // What every module reads. Created from userConfig when the module loads and
@@ -114,6 +118,10 @@ function set(config: ModsConfig, key: string, value: unknown): string | undefine
     case 'spinnerScene':
       if (!SCENE_CHOICES.includes(value as SceneChoice)) return `"spinnerScene" must be one of ${SCENE_CHOICES.join(', ')}`
       config.spinnerScene = value as SceneChoice
+      return
+    case 'notifyLanguage':
+      if (value !== 'auto' && value !== 'en' && value !== 'zh-TW') return '"notifyLanguage" must be one of auto, en, zh-TW'
+      config.notifyLanguage = value
       return
     case 'notifyBlocklist':
       if (typeof value === 'string') config.notifyBlocklist = value.split(/\s+/).filter(Boolean)

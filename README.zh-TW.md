@@ -127,7 +127,7 @@ Session：11fa1a35
 - **需要你確認權限**。
 - **回合失敗**：例如觸發用量上限。
 
-bot token 存放在 Claude Code 的安全儲存區，不會出現在任何 log 中。
+通知訊息支援英文和正體中文，預設會跟著 Claude Code 的 `language` 設定。bot token 存放在 Claude Code 的安全儲存區，不會出現在任何 log 中。
 
 ## 設定
 
@@ -142,7 +142,8 @@ bot token 存放在 Claude Code 的安全儲存區，不會出現在任何 log �
 | `ctxWarnPercent` / `ctxCriticalPercent` | `60` / `80` | context 的警告與危險門檻，影響顏色、跳出提示和 context 組成行 |
 | `notify` | `true` | Telegram 通知 |
 | `notifyMinTurnSeconds` | `0` | 比這個秒數短的回合不發完成通知；`0` 表示每回合都發 |
-| `notifyBlocklist` | `observer-sessions` | 永遠不發通知的專案資料夾名稱，以空格分隔 |
+| `notifyBlocklist` | 空白 | 永遠不發通知的專案資料夾名稱，以空格分隔 |
+| `notifyLanguage` | `auto` | `auto` 會依 Claude Code 的 `language` 設定判斷：設定為中文就用正體中文，其他語言都用英文；也可以直接指定 `en` 或 `zh-TW` |
 | `telegramBotToken` / `telegramChatId` | — | 你的 bot 與聊天室。未設定時，若 `~/.claude/hooks/.telegram.env`（`TELEGRAM_BOT_TOKEN`、`TELEGRAM_CHAT_ID`）存在就會讀取 |
 
 每個專案都可以用兩個檔案覆寫 Telegram 憑證以外的任何選項：

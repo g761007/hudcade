@@ -105,13 +105,13 @@ The spinner is terminal only; the desktop app keeps its own.
 ### Telegram notifications
 
 ```
-✅ Claude Code 完成回覆
-專案：my-app (feat/retry)
-時間：2026-10-08 14:34:19 CST
-耗時 2m14s · Opus 5.5 · xhigh · $3.21
+✅ Claude Code is done
+Project: my-app (feat/retry)
+Time: 2026-10-08 14:34:19 CST
+Took 2m14s · Opus 5.5 · xhigh · $3.21
 5h:13%(2h02m) wk:81%(5d16h) ctx:65%(opus)
-摘要：Added a retry policy with exponential backoff and covered it with 6 tests.
-Session：11fa1a35
+Summary: Added a retry policy with exponential backoff and covered it with 6 tests.
+Session: 11fa1a35
 ```
 
 Messages are sent in three cases:
@@ -120,7 +120,7 @@ Messages are sent in three cases:
 - **A permission prompt is waiting.**
 - **A turn fails**, for example on a rate limit.
 
-Messages are written in Traditional Chinese for now. The bot token stays in Claude Code's secure storage and never appears in a log.
+Messages come in English or Traditional Chinese. By default they follow Claude Code's own `language` setting. The bot token stays in Claude Code's secure storage and never appears in a log.
 
 ## Configuration
 
@@ -135,7 +135,8 @@ Everything lives in `/config`, or run `claude plugin configure hudcade`:
 | `ctxWarnPercent` / `ctxCriticalPercent` | `60` / `80` | Context thresholds for colors, toasts and the breakdown row |
 | `notify` | `true` | Telegram notifications |
 | `notifyMinTurnSeconds` | `0` | Skip completion messages for shorter turns; `0` sends every turn |
-| `notifyBlocklist` | `observer-sessions` | Project folder names that never notify, separated by spaces |
+| `notifyBlocklist` | empty | Project folder names that never notify, separated by spaces |
+| `notifyLanguage` | `auto` | `auto` follows Claude Code's `language` setting (Chinese there means Traditional Chinese, anything else English); or `en`, `zh-TW` |
 | `telegramBotToken` / `telegramChatId` | — | Your bot and chat. When unset, `~/.claude/hooks/.telegram.env` (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`) is read if it exists |
 
 Per project, `.claude/claude-mods.json` (shared with the team) and `.claude/claude-mods.local.json` (just you) override any option except the Telegram credentials:
