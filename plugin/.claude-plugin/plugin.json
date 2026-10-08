@@ -1,0 +1,104 @@
+{
+  "name": "hudcade",
+  "version": "0.1.0",
+  "author": {
+    "name": "daniel"
+  },
+  "description": "A pixel-art HUD for Claude Code: context, cost, cache, agents and rate limits at a glance, little 8-bit scenes while Claude thinks, and Telegram notifications.",
+  "license": "MIT",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "hud": {
+      "type": "boolean",
+      "title": "HUD band",
+      "description": "Show model, effort, cost, context, rate limits, git and session/agent progress above the prompt.",
+      "default": true
+    },
+    "statusLine": {
+      "type": "boolean",
+      "title": "Status line",
+      "description": "Show a compact line under the prompt: model, effort, context, cost and 5-hour/7-day usage.",
+      "default": true
+    },
+    "spinner": {
+      "type": "boolean",
+      "title": "Pixel spinner",
+      "description": "Replace the working spinner with a little 8-bit scene that reacts to what Claude is doing (terminal only).",
+      "default": true
+    },
+    "spinnerScene": {
+      "type": "string",
+      "title": "Spinner scene",
+      "description": "Which scene the spinner plays; random picks a different one each turn.",
+      "options": [
+        "random",
+        "robot",
+        "coffee",
+        "garden",
+        "rocket",
+        "cat",
+        "fishing",
+        "train",
+        "campfire",
+        "weather",
+        "equalizer"
+      ],
+      "default": "random"
+    },
+    "ctxWarnPercent": {
+      "type": "number",
+      "title": "Context warning %",
+      "description": "Context usage at which the HUD turns yellow and shows a toast.",
+      "default": 60
+    },
+    "ctxCriticalPercent": {
+      "type": "number",
+      "title": "Context critical %",
+      "description": "Context usage at which the HUD turns red and shows a toast.",
+      "default": 80
+    },
+    "notify": {
+      "type": "boolean",
+      "title": "Telegram notifications",
+      "description": "Send Telegram messages when a turn completes, needs your approval, or fails.",
+      "default": true
+    },
+    "notifyMinTurnSeconds": {
+      "type": "number",
+      "title": "Notify: minimum turn seconds",
+      "description": "Skip completion messages for turns shorter than this; 0 sends every turn.",
+      "default": 0
+    },
+    "notifyBlocklist": {
+      "type": "string",
+      "title": "Notify: blocked projects",
+      "description": "Space-separated project folder names that never notify.",
+      "default": "observer-sessions"
+    },
+    "telegramBotToken": {
+      "type": "string",
+      "title": "Telegram bot token",
+      "description": "Bot token from @BotFather. When unset, ~/.claude/hooks/.telegram.env is read instead.",
+      "sensitive": true,
+      "required": false
+    },
+    "telegramChatId": {
+      "type": "string",
+      "title": "Telegram chat id",
+      "description": "Chat that receives the messages. When unset, ~/.claude/hooks/.telegram.env is read instead.",
+      "sensitive": true,
+      "required": false
+    }
+  },
+  "homepage": "https://github.com/g761007/hudcade",
+  "repository": "https://github.com/g761007/hudcade",
+  "keywords": [
+    "hud",
+    "statusline",
+    "claude-code",
+    "mod",
+    "pixel-art",
+    "spinner",
+    "telegram"
+  ]
+}

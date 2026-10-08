@@ -1,0 +1,14 @@
+# Runtime state left by the old oh-my-claudecode HUD
+.omc/
+
+# Type declarations the Claude Code engine lays beside a loaded mod
+plugin/.claude-plugin/types/
+
+# Personal per-project overrides
+.claude/claude-mods.local.json
+
+.DS_Store
+node_modules/
+
+# Local planning notes
+docs/plans/

@@ -1,0 +1,14 @@
+{
+  "name": "hudcade",
+  "owner": {
+    "name": "g761007"
+  },
+  "description": "hudcade: a pixel-art HUD for Claude Code, built as a mod.",
+  "plugins": [
+    {
+      "name": "hudcade",
+      "source": "./plugin",
+      "description": "A pixel-art HUD for Claude Code: context, cost, cache, agents and rate limits at a glance, little 8-bit scenes while Claude thinks, and Telegram notifications."
+    }
+  ]
+}
