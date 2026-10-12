@@ -1,5 +1,5 @@
 import type { On } from 'claude-code'
-import { describe, expect, mock, test } from 'claude-code/testing'
+import { describe, expect, mock, test, type Engine } from 'claude-code/testing'
 
 const PLUGIN = 'hudcade'
 
@@ -49,6 +49,57 @@ describe('band', () => {
     expect(await ui.find({ type: 'Text', text: /idle|working/ })).toBeUndefined()
     expect(await ui.find({ type: 'Text', text: 'ENGINE' })).toBeDefined()
     await ui.unmount()
+  })
+})
+
+describe('agents', () => {
+  const BACKGROUND_AGENT = { tool: 'Agent', description: 'probe', prompt: 'p', subagent_type: 'general-purpose', run_in_background: true } as never
+
+  // A background Agent call answers with its id alone; no SubagentStop follows.
+  function launchesInBackground(on: On, roster: () => string): void {
+    on('tool.call', () => ({ result: { status: 'async_launched', agentId: 'ag1' }, text: '' }) as never)
+    on('agent.list', () => ({ value: [{ id: 'ag1', type: 'general-purpose', description: 'probe', status: roster() }] }) as never)
+  }
+
+  async function bandShowsDone($: Engine, surface: 'terminal' | 'desktop'): Promise<boolean> {
+    const ui = await $.ui.mount({ plugin: PLUGIN, surface, component: 'AbovePrompt', props: BAND_PROPS })
+    expect(await ui.find({ type: 'Text', text: 'general-purpose' })).toBeDefined()
+    const isDone = (await ui.find({ type: 'Text', text: '✓ ' })) !== undefined
+    await ui.unmount()
+    return isDone
+  }
+
+  test('a background agent the roster calls completed shows ✓ once the main turn ends', async ($, on) => {
+    const clock = mock.clock(on)
+    engineDraws(on)
+    launchesInBackground(on, () => 'completed')
+    on('turn.complete', (_$, e) => ({ text: e.answer }) as never)
+
+    await $.tool.call(BACKGROUND_AGENT)
+    for (const surface of ['terminal', 'desktop'] as const) expect(await bandShowsDone($, surface)).toBe(false)
+
+    await $.turn.complete({ answer: 'ok', durationMs: 1_000, isAborted: false, turnId: 't1', reason: 'answer' } as never)
+    await clock.settle()
+    for (const surface of ['terminal', 'desktop'] as const) expect(await bandShowsDone($, surface)).toBe(true)
+  })
+
+  test('while a turn runs, the roster is read every 15 seconds', async ($, on) => {
+    const clock = mock.clock(on)
+    engineDraws(on)
+    let status = 'running'
+    launchesInBackground(on, () => status)
+    on('turn.start', (_$, e) => ({ turnId: e.turnId }))
+
+    await $.turn.start({ text: 'hi', turnId: 't1' })
+    await $.tool.call(BACKGROUND_AGENT)
+    await clock.advance(15_000)
+    expect(await bandShowsDone($, 'terminal')).toBe(false)
+
+    status = 'completed'
+    await clock.advance(14_000)
+    expect(await bandShowsDone($, 'terminal')).toBe(false)
+    await clock.advance(1_000)
+    expect(await bandShowsDone($, 'terminal')).toBe(true)
   })
 })
 

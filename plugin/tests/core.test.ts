@@ -26,6 +26,8 @@ import {
   launchAgent,
   linkAgent,
   parseGitStatus,
+  pruneAgents,
+  reconcileAgents,
   startTool,
   startTurn,
   taskCreated,
@@ -157,6 +159,53 @@ describe('hud model', () => {
     expect(h.agents[0]?.status).toBe('running')
     h = finishAgent(h, 'ag9', 50)
     expect(h.agents[0]?.status).toBe('done')
+  })
+
+  // A background agent launched at 0 that only reported its id, busy in Bash.
+  function launchedInBackground(): Hud {
+    let h = launchAgent(emptyHud('p'), { toolUseId: 'tu1', type: 'general-purpose', description: '', isBackground: true, now: 0 })
+    h = agentResult(h, 'tu1', { agentId: 'ag1', isLaunchOnly: true, isError: false }, 5)
+    return startTool(h, { id: 'b1', tool: 'Bash', detail: 'ls', startedAt: 10, agentId: 'ag1' })
+  }
+
+  test('a background agent whose SubagentStop never came ends when the roster says completed, and goes a minute later', () => {
+    const h = reconcileAgents(launchedInBackground(), [{ id: 'ag1', status: 'completed' }], 700_000)
+    expect(h.agents[0]).toMatchObject({ status: 'done', endedAt: 700_000 })
+    expect(h.agents[0]?.currentTool).toBeUndefined()
+    expect(h.tools.running).toEqual([])
+    expect(pruneAgents(h.agents, 759_999)).toHaveLength(1)
+    expect(pruneAgents(h.agents, 760_000)).toEqual([])
+  })
+
+  test('an agent the roster calls failed or killed is marked failed', () => {
+    for (const status of ['failed', 'killed']) {
+      const h = reconcileAgents(launchedInBackground(), [{ id: 'ag1', status }], 20_000)
+      expect(h.agents[0]).toMatchObject({ status: 'failed', endedAt: 20_000 })
+    }
+  })
+
+  test('a launched agent the roster no longer lists ends once past the launch grace', () => {
+    const h = launchedInBackground()
+    expect(reconcileAgents(h, [], 9_999).agents[0]?.status).toBe('running')
+    expect(reconcileAgents(h, [], 10_000).agents[0]).toMatchObject({ status: 'done', endedAt: 10_000 })
+    // A workflow's agents are never listed: a row no Agent call launched keeps running.
+    const workflow = startTool(emptyHud('p'), { id: 'w1', tool: 'Read', detail: '', startedAt: 0, agentId: 'wf1' })
+    expect(reconcileAgents(workflow, [], 600_000).agents[0]?.status).toBe('running')
+  })
+
+  test('an agent the roster still counts as live keeps running', () => {
+    const h = launchedInBackground()
+    for (const status of ['pending', 'running', 'waiting', 'idle']) {
+      expect(reconcileAgents(h, [{ id: 'ag1', status }], 600_000)).toEqual(h)
+    }
+  })
+
+  test('rows without an id, and rows already ended, are left as they were', () => {
+    let h = finishAgent(launchedInBackground(), 'ag1', 50)
+    h = launchAgent(h, { toolUseId: 'tu2', type: 'Explore', description: '', isBackground: true, now: 60 })
+    const after = reconcileAgents(h, [{ id: 'ag1', status: 'failed' }], 600_000)
+    expect(after.agents).toEqual(h.agents)
+    expect(after.agents[0]).toMatchObject({ status: 'done', endedAt: 50 })
   })
 
   test('tasks are matched by id, or by position before the id was known', () => {

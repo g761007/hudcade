@@ -4,6 +4,7 @@
 import type { AgentRun, BackgroundTask, CacheStats, Cron, CtxSlice, Hud, TaskItem, Teammate, ToolRun } from '../../types'
 
 const DONE_AGENT_TTL_MS = 60_000
+const AGENT_LIST_GRACE_MS = 10_000
 const MAX_RUNNING_TOOLS = 50
 
 export function emptyHud(project: string): Hud {
@@ -287,6 +288,30 @@ export function finishAgent(h: Hud, agentId: string, now: number): Hud {
       a.agentId === agentId && a.status === 'running' ? { ...a, status: 'done', endedAt: now, currentTool: undefined } : a,
     ),
     tools: { ...h.tools, running: h.tools.running.filter(t => t.agentId !== agentId) },
+  }
+}
+
+// `$.agent.list()` as the backstop for a SubagentStop that never arrived: a
+// running row the roster calls ended is finished. So is one it no longer
+// lists, once past the launch grace, but only a row an Agent call launched:
+// a workflow's agents are never listed.
+export function reconcileAgents(h: Hud, live: readonly { id: string; status: string }[], now: number): Hud {
+  const statuses = new Map(live.map(a => [a.id, a.status]))
+  const ended = new Set<string>()
+  const agents = h.agents.map((a): AgentRun => {
+    if (a.status !== 'running' || !a.agentId) return a
+    const status = statuses.get(a.agentId)
+    const isDropped = status === undefined && a.toolUseId !== undefined && now - a.startedAt >= AGENT_LIST_GRACE_MS
+    const end = status === 'completed' || isDropped ? 'done' : status === 'failed' || status === 'killed' ? 'failed' : undefined
+    if (!end) return a
+    ended.add(a.agentId)
+    return { ...a, status: end, endedAt: now, currentTool: undefined }
+  })
+  if (ended.size === 0) return h
+  return {
+    ...h,
+    agents,
+    tools: { ...h.tools, running: h.tools.running.filter(t => !t.agentId || !ended.has(t.agentId)) },
   }
 }
 

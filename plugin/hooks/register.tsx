@@ -29,6 +29,7 @@ import {
   noteCompaction,
   parseGitStatus,
   patchCounts,
+  reconcileAgents,
   setCacheTtl,
   setCtxTop,
   setAgentModel,
@@ -51,6 +52,7 @@ const hudAtom = atom({ plugin: 'hudcade', key: 'hud' } as const, emptyHud(''))
 const PROJECT_FILES = ['claude-mods.json', 'claude-mods.local.json'] as const
 const GIT_THROTTLE_MS = 3_000
 const GIT_TOOLS = new Set(['Bash', 'Edit', 'Write', 'NotebookEdit'])
+const AGENT_SYNC_MS = 15_000
 const FRAME_MS = 80
 const SPINNER_TEXT_COLUMNS = 36
 
@@ -71,6 +73,7 @@ async function snapshot($: EngineInterface): Promise<Hud> {
 let runtime: Runtime = createRuntime({})
 let values: Record<string, unknown> = {}
 let lastGitAt = 0
+let lastAgentSyncAt = 0
 let gitNote = 'not read yet'
 let lastStatus: string | undefined
 let ticker: Timer | undefined
@@ -162,12 +165,19 @@ async function applyMeasure($: EngineInterface, usage: UsageInput): Promise<void
   }
 }
 
-async function refreshTeammates($: EngineInterface): Promise<void> {
+// The engine's roster: teammate rows, and agent rows it has ended though no
+// SubagentStop arrived. The ticker reads it once per AGENT_SYNC_MS at most.
+async function refreshAgents($: EngineInterface, isThrottled = false): Promise<void> {
   try {
+    const now = await $.clock.now()
+    if (isThrottled && now - lastAgentSyncAt < AGENT_SYNC_MS) return
+    lastAgentSyncAt = now
     const agents = await $.agent.list()
-    await patch($, h => setTeammates(h, agents))
+    const h = await patch($, h => reconcileAgents(setTeammates(h, agents), agents, now))
+    syncTicker($, h.turn.status !== 'idle' || h.agents.some(a => a.status === 'running'))
   } catch {
-    // Agent teams off, or the roster unavailable: no teammate rows.
+    // Agent teams off, or the roster unavailable: no teammate rows, and agent
+    // rows wait for SubagentStop.
   }
 }
 
@@ -195,11 +205,15 @@ async function syncStatus($: EngineInterface): Promise<void> {
   $.ui.status(text)
 }
 
-// Redraws once a second while something runs, for the elapsed clocks.
+// Redraws once a second while something runs, for the elapsed clocks, and
+// rechecks the agent roster now and then.
 function syncTicker($: EngineInterface, isBusy: boolean): void {
   const wantsTicks = isBusy && (runtime.config.hud || runtime.config.spinner)
   if (wantsTicks && !ticker) {
-    ticker = $.clock.every(1_000, () => $.ui.invalidate('ui.render'))
+    ticker = $.clock.every(1_000, () => {
+      $.ui.invalidate('ui.render')
+      void refreshAgents($, true)
+    })
   } else if (!wantsTicks && ticker) {
     ticker.cancel()
     ticker = undefined
@@ -460,7 +474,7 @@ export const register: Register = (on, options) => {
       syncTicker($, h.agents.some(a => a.status === 'running'))
       stopFrames()
       void refreshGit($)
-      void refreshTeammates($)
+      void refreshAgents($)
       const percent = h.ctx?.percent
       if (percent !== undefined && percent >= runtime.config.ctxWarnPercent) void refreshContextBreakdown($)
       await syncStatus($)
@@ -544,7 +558,7 @@ export const register: Register = (on, options) => {
     const now = await $.clock.now()
     await patch($, h => linkAgent(h, e.agent_id, e.agent_type, now))
     syncTicker($, true)
-    void refreshTeammates($)
+    void refreshAgents($)
     return next(e)
   })
 
@@ -578,6 +592,7 @@ export const register: Register = (on, options) => {
         .map(t => ({ id: t.id, type: t.type, status: t.status, description: t.description || t.command || t.name || t.type }))
       const crons = (e.session_crons ?? []).map(c => ({ id: c.id, schedule: c.schedule, isRecurring: c.recurring, prompt: c.prompt }))
       await patch($, h => setWorkers(h, background, crons))
+      void refreshAgents($)
     }
     return next(e)
   })
@@ -588,7 +603,7 @@ export const register: Register = (on, options) => {
   })
 
   on('classic.TeammateIdle', async ($, e, next) => {
-    void refreshTeammates($)
+    void refreshAgents($)
     return next(e)
   })
 
