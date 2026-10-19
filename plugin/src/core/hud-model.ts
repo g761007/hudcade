@@ -27,7 +27,10 @@ export function emptyHud(project: string): Hud {
 // reload) gets the fields it lacks.
 export function withDefaults(h: Partial<Hud> | undefined): Hud {
   const base = emptyHud(h?.project ?? '')
-  return { ...base, ...h, diff: { ...base.diff, ...h?.diff } } as Hud
+  // An agent row from before work time was kept starts with none, its clock
+  // stopped until the agent's next request.
+  const agents = (h?.agents ?? []).map(a => ({ ...a, workedMs: a.workedMs ?? 0 }))
+  return { ...base, ...h, diff: { ...base.diff, ...h?.diff }, agents } as Hud
 }
 
 export type UsageInput = {
@@ -246,6 +249,8 @@ export function launchAgent(h: Hud, launch: AgentLaunch): Hud {
     model: launch.model,
     isBackground: launch.isBackground,
     startedAt: launch.now,
+    workedMs: 0,
+    workingSince: launch.now,
     tools: 0,
     status: 'running',
   }
@@ -276,7 +281,7 @@ export function agentResult(
       if (a.toolUseId !== toolUseId) return a
       const linked = { ...a, agentId: a.agentId ?? result.agentId, model: result.model ?? a.model }
       if (result.isLaunchOnly && !result.isError) return linked
-      return { ...linked, status: result.isError ? 'failed' : 'done', endedAt: now, currentTool: undefined }
+      return { ...stopWork(linked, now), status: result.isError ? 'failed' : 'done', endedAt: now, currentTool: undefined }
     }),
   }
 }
@@ -285,10 +290,35 @@ export function finishAgent(h: Hud, agentId: string, now: number): Hud {
   return {
     ...h,
     agents: h.agents.map(a =>
-      a.agentId === agentId && a.status === 'running' ? { ...a, status: 'done', endedAt: now, currentTool: undefined } : a,
+      a.agentId === agentId && a.status === 'running' ? { ...stopWork(a, now), status: 'done', endedAt: now, currentTool: undefined } : a,
     ),
     tools: { ...h.tools, running: h.tools.running.filter(t => t.agentId !== agentId) },
   }
+}
+
+// An agent's clock counts the time it works, not how long its row is listed:
+// it runs from the launch to the end of the run (`turn.complete`), and again
+// from the agent's next request (`turn.step`) when it takes on more work.
+export function agentWorkedMs(a: AgentRun, now: number): number {
+  return a.workedMs + (a.workingSince === undefined ? 0 : Math.max(0, now - a.workingSince))
+}
+
+export function pauseAgent(h: Hud, agentId: string, now: number): Hud {
+  return { ...h, agents: h.agents.map(a => (a.agentId === agentId ? stopWork(a, now) : a)) }
+}
+
+// A subagent's run raises no turn.start: its first request restarts the clock.
+export function resumeAgent(h: Hud, agentId: string, now: number): Hud {
+  return {
+    ...h,
+    agents: h.agents.map(a =>
+      a.agentId === agentId && a.status === 'running' && a.workingSince === undefined ? { ...a, workingSince: now } : a,
+    ),
+  }
+}
+
+function stopWork(a: AgentRun, now: number): AgentRun {
+  return a.workingSince === undefined ? a : { ...a, workedMs: agentWorkedMs(a, now), workingSince: undefined }
 }
 
 // `$.agent.list()` as the backstop for a SubagentStop that never arrived: a
@@ -305,7 +335,7 @@ export function reconcileAgents(h: Hud, live: readonly { id: string; status: str
     const end = status === 'completed' || isDropped ? 'done' : status === 'failed' || status === 'killed' ? 'failed' : undefined
     if (!end) return a
     ended.add(a.agentId)
-    return { ...a, status: end, endedAt: now, currentTool: undefined }
+    return { ...stopWork(a, now), status: end, endedAt: now, currentTool: undefined }
   })
   if (ended.size === 0) return h
   return {
@@ -332,7 +362,18 @@ function ensureAgent(agents: AgentRun[], agentId: string, now: number, type = 'a
   if (agents.some(a => a.agentId === agentId)) return agents
   return [
     ...agents,
-    { key: `ag:${agentId}`, agentId, type, description: '', isBackground: false, startedAt: now, tools: 0, status: 'running' },
+    {
+      key: `ag:${agentId}`,
+      agentId,
+      type,
+      description: '',
+      isBackground: false,
+      startedAt: now,
+      workedMs: 0,
+      workingSince: now,
+      tools: 0,
+      status: 'running',
+    },
   ]
 }
 

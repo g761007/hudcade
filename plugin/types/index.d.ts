@@ -41,6 +41,9 @@ export type AgentRun = {
   isBackground: boolean
   startedAt: number
   endedAt?: number
+  // Time spent working, over the runs already ended; the run under way began at workingSince.
+  workedMs: number
+  workingSince?: number
   tools: number
   currentTool?: string
   status: 'running' | 'done' | 'failed'

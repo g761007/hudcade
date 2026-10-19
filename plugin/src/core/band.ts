@@ -21,7 +21,7 @@ import {
   truncate,
   usd,
 } from './format'
-import { cacheHitPercent, withDefaults } from './hud-model'
+import { agentWorkedMs, cacheHitPercent, withDefaults } from './hud-model'
 
 export type Seg = { text: string; color?: string; dim?: boolean; bold?: boolean }
 export type Row = { left: Seg[]; right: Seg[] }
@@ -281,7 +281,7 @@ function agentRow(a: AgentRun, now: number): Seg[] {
     { text: a.type, color, bold: isRunning },
     ...(model ? [{ text: ` · ${model}`, dim: true }] : []),
     ...(a.isBackground ? [{ text: ' · bg', dim: true }] : []),
-    { text: ` · ${clock((a.endedAt ?? now) - a.startedAt)} · ${a.tools} tools`, dim: true },
+    { text: ` · ${clock(agentWorkedMs(a, now))} · ${a.tools} tools`, dim: true },
     ...(a.currentTool ? [{ text: ` ▸ ${toolLabel(a.currentTool)}`, color: 'suggestion' }] : []),
     ...(a.description ? [{ text: ` · ${a.description}`, dim: !isRunning }] : []),
   ]

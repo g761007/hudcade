@@ -101,6 +101,34 @@ describe('agents', () => {
     await clock.advance(1_000)
     expect(await bandShowsDone($, 'terminal')).toBe(true)
   })
+
+  test('an agent’s clock stops when its run ends and picks up with its next request', async ($, on) => {
+    const clock = mock.clock(on)
+    engineDraws(on)
+    on('tool.call', () => ({ result: { status: 'async_launched', agentId: 'ag1' }, text: '' }) as never)
+    on('turn.step', async function* (_$, e) {
+      return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn', usage: null } as never
+    })
+    on('turn.complete', (_$, e) => ({ text: e.answer }) as never)
+    const bandShows = async (worked: string) => {
+      const ui = await $.ui.mount({ plugin: PLUGIN, surface: 'terminal', component: 'AbovePrompt', props: BAND_PROPS })
+      const found = await ui.find({ type: 'Text', text: ` · ${worked} · 0 tools` })
+      await ui.unmount()
+      return found !== undefined
+    }
+
+    await $.tool.call(BACKGROUND_AGENT)
+    await clock.advance(10_000)
+    await $.turn.complete({ answer: 'ok', durationMs: 10_000, isAborted: false, turnId: 'r1', reason: 'answer', agentId: 'ag1' } as never)
+    await clock.advance(60_000)
+    expect(await bandShows('0:10')).toBe(true)
+
+    for await (const _chunk of $.turn.step({ turnId: 'r2', index: 0, model: 'claude-haiku-5-5', messageCount: 3, agentId: 'ag1' })) {
+      // The request streams nothing.
+    }
+    await clock.advance(5_000)
+    expect(await bandShows('0:15')).toBe(true)
+  })
 })
 
 describe('status line', () => {

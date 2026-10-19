@@ -11,6 +11,7 @@ import {
   addDiff,
   addRequestUsage,
   agentResult,
+  agentWorkedMs,
   applyResume,
   applyUsage,
   cacheHitPercent,
@@ -26,8 +27,10 @@ import {
   launchAgent,
   linkAgent,
   parseGitStatus,
+  pauseAgent,
   pruneAgents,
   reconcileAgents,
+  resumeAgent,
   startTool,
   startTurn,
   taskCreated,
@@ -208,6 +211,29 @@ describe('hud model', () => {
     expect(after.agents[0]).toMatchObject({ status: 'done', endedAt: 50 })
   })
 
+  test('an agent’s clock counts its work: it stops between runs and picks up where it left off', () => {
+    let h = launchedInBackground()
+    expect(agentWorkedMs(h.agents[0]!, 4_000)).toBe(4_000)
+    h = pauseAgent(h, 'ag1', 10_000)
+    // An hour idle adds nothing.
+    expect(agentWorkedMs(h.agents[0]!, 3_610_000)).toBe(10_000)
+    h = resumeAgent(h, 'ag1', 3_610_000)
+    expect(agentWorkedMs(h.agents[0]!, 3_615_000)).toBe(15_000)
+    // A second request of the same run leaves the clock as it was.
+    expect(resumeAgent(h, 'ag1', 3_614_000).agents[0]?.workingSince).toBe(3_610_000)
+    h = finishAgent(h, 'ag1', 3_620_000)
+    expect(agentWorkedMs(h.agents[0]!, 3_650_000)).toBe(20_000)
+  })
+
+  test('a finished agent’s clock stays stopped, and other agents keep theirs', () => {
+    let h = launchedInBackground()
+    h = launchAgent(h, { toolUseId: 'tu2', type: 'Explore', description: '', isBackground: false, now: 1_000 })
+    h = agentResult(h, 'tu2', { agentId: 'ag2', isLaunchOnly: false, isError: true }, 3_000)
+    h = pauseAgent(h, 'ag1', 8_000)
+    h = resumeAgent(h, 'ag2', 9_000)
+    expect(h.agents.map(a => agentWorkedMs(a, 60_000))).toEqual([8_000, 2_000])
+  })
+
   test('tasks are matched by id, or by position before the id was known', () => {
     let h = taskCreated(emptyHud('p'), 'one', undefined)
     h = taskCreated(h, 'two', '7')
@@ -372,6 +398,18 @@ describe('band', () => {
   test('a state from an older version of the mod still draws', () => {
     const old = { project: 'p', rates: [], turn: { count: 1, status: 'idle' }, tools: { total: 0, failed: 0, running: [] }, agents: [], tasks: [] }
     expect(texts(old as unknown as Hud)[0]).toContain('Claude')
+  })
+
+  test('an agent row shows the time the agent worked, not how long it has been listed', () => {
+    let h = launchAgent(emptyHud('p'), { toolUseId: 'tu1', type: 'Plan', description: '', isBackground: true, now: 0 })
+    h = agentResult(h, 'tu1', { agentId: 'ag1', isLaunchOnly: true, isError: false }, 1_000)
+    h = pauseAgent(h, 'ag1', 12_000)
+    const row = texts(h, 200, 64 * 3_600_000).find(r => r.includes('Plan'))
+    expect(row).toContain('· 0:12 ·')
+    // A row an older version of the mod wrote has no work time yet.
+    const legacy = { key: 'tu:t', toolUseId: 't', type: 'Old', description: '', isBackground: false, startedAt: 0, tools: 1, status: 'running' }
+    const old = texts({ ...emptyHud('p'), agents: [legacy] } as unknown as Hud, 200, 64 * 3_600_000)
+    expect(old.find(r => r.includes('Old'))).toContain('· 0:00 ·')
   })
 
   test('the line under the prompt carries model, effort, context, cost and 5h/7d usage', () => {

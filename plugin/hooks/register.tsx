@@ -29,7 +29,9 @@ import {
   noteCompaction,
   parseGitStatus,
   patchCounts,
+  pauseAgent,
   reconcileAgents,
+  resumeAgent,
   setCacheTtl,
   setCtxTop,
   setAgentModel,
@@ -444,6 +446,11 @@ export const register: Register = (on, options) => {
       )
       if (!e.agentId) await syncStatus($)
     }
+    const agentId = e.agentId
+    if (agentId && hud.agents.some(a => a.agentId === agentId && a.status === 'running' && a.workingSince === undefined)) {
+      const now = await $.clock.now()
+      await patch($, h => resumeAgent(h, agentId, now))
+    }
 
     // Read the request's stream through unchanged; its stop chunk carries the
     // tokens, cache reads and writes included.
@@ -486,6 +493,10 @@ export const register: Register = (on, options) => {
           summary: summarize(e.answer),
         })
       }
+    } else {
+      const now = await $.clock.now()
+      const agentId = e.agentId
+      await patch($, h => pauseAgent(h, agentId, now))
     }
     return next(e)
   })
