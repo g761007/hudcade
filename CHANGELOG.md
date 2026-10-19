@@ -5,6 +5,16 @@ All notable changes to hudcade are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.2] - 2026-10-19
+
+### Fixed
+
+- A subagent's row on the HUD band now shows the time the agent spent working,
+  not how long the row has been listed. The clock stops when the agent's run
+  ends and picks up again when the agent takes on more work, so an agent left
+  idle no longer adds hours to its row. A row from an older version of the mod
+  starts at 0:00 and counts from the agent's next request.
+
 ## [0.1.1] - 2026-10-12
 
 ### Fixed
@@ -39,5 +49,6 @@ The first release.
 - Toasts at the context warning and critical thresholds, and before a model
   switch that would throw away a warm prompt cache.
 
+[0.1.2]: https://github.com/g761007/hudcade/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/g761007/hudcade/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/g761007/hudcade/releases/tag/v0.1.0
