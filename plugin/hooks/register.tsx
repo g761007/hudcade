@@ -38,6 +38,7 @@ import {
   setTeammates,
   setWaiting,
   setWorkers,
+  spawnAgent,
   startTool,
   startTurn,
   taskCreated,
@@ -402,6 +403,12 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
+  // A /clear ends the conversation and its prompt cache.
+  on('session.end', async ($, e, next) => {
+    if (e.reason === 'clear') await patch($, h => ({ ...h, cache: undefined }))
+    return next(e)
+  })
+
   on('session.measure', async ($, e, next) => {
     await applyMeasure($, { context: e.context, rateLimits: e.rateLimits, cost: e.cost })
     await syncStatus($)
@@ -564,6 +571,25 @@ export const register: Register = (on, options) => {
     }
     return ran
   }).catch(($, e, next) => next(e))
+
+  // The classic.* hooks below are passed over where a managed plugin sits above
+  // this one (cc-plugin-sec-default on Team and Enterprise plans); agent.spawn
+  // and session.end carry what they can of SubagentStart and SessionStart.
+  on('agent.spawn', async ($, e, next) => {
+    const spawned = await next(e)
+    const agentId = spawned.agentId
+    // Teammates are listed from the roster, not as agent rows.
+    if (!agentId || e.isTeammate) return spawned
+    try {
+      const now = await $.clock.now()
+      await patch($, h => spawnAgent(h, { toolUseId: e.tool_use_id, agentId, type: e.subagentType, now }))
+      syncTicker($, true)
+      void refreshAgents($)
+    } catch {
+      // Bookkeeping never changes the spawn.
+    }
+    return spawned
+  })
 
   on('classic.SubagentStart', async ($, e, next) => {
     const now = await $.clock.now()
