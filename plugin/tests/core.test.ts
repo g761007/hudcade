@@ -31,6 +31,7 @@ import {
   pruneAgents,
   reconcileAgents,
   resumeAgent,
+  spawnAgent,
   startTool,
   startTurn,
   taskCreated,
@@ -154,6 +155,15 @@ describe('hud model', () => {
     h = endTool(h, 'x', false)
     h = agentResult(h, 'tu1', { agentId: 'ag1', model: 'claude-haiku-5-5', isLaunchOnly: false, isError: false }, 99)
     expect(h.agents[0]).toMatchObject({ status: 'done', endedAt: 99, model: 'claude-haiku-5-5' })
+  })
+
+  test('agent.spawn links the Agent call it names, not the oldest launch of that type', () => {
+    let h = launchAgent(emptyHud('p'), { toolUseId: 'tu1', type: 'Explore', description: 'a', isBackground: false, now: 0 })
+    h = launchAgent(h, { toolUseId: 'tu2', type: 'Explore', description: 'b', isBackground: false, now: 1 })
+    h = spawnAgent(h, { toolUseId: 'tu2', agentId: 'ag2', type: 'Explore', now: 5 })
+    expect(h.agents.map(a => a.agentId)).toEqual([undefined, 'ag2'])
+    // A SubagentStart that already linked the id, or a repeat, changes nothing.
+    expect(spawnAgent(h, { toolUseId: 'tu1', agentId: 'ag2', type: 'Explore', now: 6 })).toBe(h)
   })
 
   test('a background agent keeps running after its launch result until SubagentStop', () => {

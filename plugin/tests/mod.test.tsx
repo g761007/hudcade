@@ -43,6 +43,32 @@ describe('band', () => {
     }
   })
 
+  // classic.SessionStart is passed over under a managed seat; the test raises none.
+  test('a /clear drops the prompt cache figures', async ($, on) => {
+    mock.clock(on)
+    engineDraws(on)
+    const usage = { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 2_990, cache_creation_input_tokens: 0 }
+    on('turn.step', async function* (_$, e) {
+      yield { kind: 'stop', stopReason: 'end_turn', usage } as never
+      return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn', usage } as never
+    })
+    on('session.end', (_$, e) => ({ sessionId: e.sessionId }))
+    const bandShowsCache = async () => {
+      const ui = await $.ui.mount({ plugin: PLUGIN, surface: 'terminal', component: 'AbovePrompt', props: BAND_PROPS })
+      const found = await ui.find({ type: 'Text', text: 'cache ' })
+      await ui.unmount()
+      return found !== undefined
+    }
+
+    for await (const _chunk of $.turn.step({ turnId: 't1', index: 0, model: 'claude-opus-5-5', messageCount: 1 })) {
+      // The request's one chunk carries its usage.
+    }
+    expect(await bandShowsCache()).toBe(true)
+
+    await $.session.end({ reason: 'clear', sessionId: 's1', resume: { id: 's1' } })
+    expect(await bandShowsCache()).toBe(false)
+  })
+
   test('stays out of the way when the hud module is off', { options: { hud: false } }, async ($, on) => {
     engineDraws(on)
     const ui = await $.ui.mount({ plugin: PLUGIN, surface: 'terminal', component: 'AbovePrompt', props: BAND_PROPS })
@@ -100,6 +126,47 @@ describe('agents', () => {
     expect(await bandShowsDone($, 'terminal')).toBe(false)
     await clock.advance(1_000)
     expect(await bandShowsDone($, 'terminal')).toBe(true)
+  })
+
+  // classic.SubagentStart is passed over under a managed seat; the test raises none.
+  test('a foreground agent is linked as it spawns, so its row shows its model while it runs', async ($, on) => {
+    mock.clock(on)
+    engineDraws(on)
+    let reached = () => {}
+    const isReached = new Promise<void>(resolve => (reached = resolve))
+    let release = () => {}
+    const isReleased = new Promise<void>(resolve => (release = resolve))
+    on('tool.call', async () => {
+      reached()
+      await isReleased
+      return { result: { status: 'completed', agentId: 'ag1' }, text: '' } as never
+    })
+    on('agent.spawn', () => ({ model: 'claude-haiku-5-5', agentId: 'ag1' }))
+    on('turn.step', async function* (_$, e) {
+      return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn', usage: null } as never
+    })
+
+    const call = $.tool.call({ tool: 'Agent', tool_use_id: 'tu1', description: 'probe', prompt: 'p', subagent_type: 'Explore' } as never)
+    await isReached
+    await $.agent.spawn({
+      tool_use_id: 'tu1',
+      prompt: 'p',
+      description: 'probe',
+      subagentType: 'Explore',
+      provider: { plugin: 'engine', tier: 'core' },
+      parentModel: 'claude-opus-5-5',
+      background: false,
+      fork: false,
+    } as never)
+    for await (const _chunk of $.turn.step({ turnId: 'r1', index: 0, model: 'claude-haiku-5-5', messageCount: 1, agentId: 'ag1' })) {
+      // The request streams nothing.
+    }
+
+    const ui = await $.ui.mount({ plugin: PLUGIN, surface: 'terminal', component: 'AbovePrompt', props: BAND_PROPS })
+    expect(await ui.find({ type: 'Text', text: ' · Haiku 5.5' })).toBeDefined()
+    await ui.unmount()
+    release()
+    await call
   })
 
   test('an agent’s clock stops when its run ends and picks up with its next request', async ($, on) => {

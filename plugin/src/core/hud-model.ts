@@ -267,6 +267,15 @@ export function linkAgent(h: Hud, agentId: string, agentType: string, now: numbe
   return { ...h, agents: h.agents.map((a, i) => (i === fallback ? { ...a, agentId } : a)) }
 }
 
+// agent.spawn names the Agent call the loop belongs to: attach its id to that
+// launch exactly; a spawn no launch stands for is linked as SubagentStart does.
+export function spawnAgent(h: Hud, spawn: { toolUseId: string; agentId: string; type: string; now: number }): Hud {
+  if (h.agents.some(a => a.agentId === spawn.agentId)) return h
+  const index = h.agents.findIndex(a => a.toolUseId === spawn.toolUseId && !a.agentId)
+  if (index < 0) return linkAgent(h, spawn.agentId, spawn.type, spawn.now)
+  return { ...h, agents: h.agents.map((a, i) => (i === index ? { ...a, agentId: spawn.agentId } : a)) }
+}
+
 // The Agent tool's result: a foreground agent is finished; a background one
 // only reports its id.
 export function agentResult(
