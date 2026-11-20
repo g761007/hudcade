@@ -9,32 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Turn replay: `/hud replay` steps through the last turn that called tools:
-  each call's tool, its arguments in full, outcome and time, the start of
-  what it answered, and the lines an edit changed. `d` opens an Edit's or Write's diff,
-  noted from the file before the call ran, so a refused one shows too. `a`
-  goes into a subagent's own track of calls; `b` or Escape goes back. The
-  last replay of each project is kept on disk, so it outlives a restart. The
-  idle band offers it once such a turn ends.
-
-- One-click handoff: past the critical context threshold the idle band
-  offers a handoff button, and `/hud handoff` runs one at any time. A fork of
-  the conversation writes a summary (goal, done, not done yet, files changed,
-  what to watch out for), saved under `~/.claude/handoffs/<project>/`; the
-  conversation is cleared and starts over with the summary as its first
-  prompt. With no summary, the conversation is left as it was.
-- `handoffPercent` option (80 by default) for when the band offers a
-  handoff, and `/hud handoff-at <percent>` to set it from the prompt, kept
-  across sessions; `/hud handoff-at default` goes back to the option.
+- Turn replay: `/hud replay` opens a pane on the last turn that called
+  tools, and you step through it call by call: each call's tool, its
+  arguments in full, its outcome and time, the start of what it answered,
+  and the lines an edit changed. `d` opens the diff an Edit or Write asked
+  for, noted from the file before the call ran, so a refused one shows too.
+  `a` goes into a subagent's own track of calls; `b` or Escape goes back.
+  The last replay of each project is kept on disk, so it outlives a restart.
+  The idle band offers it once such a turn ends.
+- One-click handoff: from `handoffPercent` of context (80% by default) the
+  idle band offers a handoff button, and `/hud handoff` runs one at any
+  time. A fork of the conversation writes a summary (goal, done, not done
+  yet, files changed, what to watch out for), saved under
+  `~/.claude/handoffs/<project>/`; the conversation is cleared and starts
+  over with the summary as its first prompt. With no summary, the
+  conversation is left as it was.
+- `/hud handoff-at <percent>` sets the handoff threshold from the prompt,
+  kept across sessions; `/hud handoff-at default` goes back to the option.
+- `/hud` shows what the cache countdown counts from: the cache's lifetime,
+  when the main conversation's last request was sent, and when the cache
+  runs out.
 
 ### Changed
 
 - The idle band's prompt-cache countdown turns amber five minutes before
   the cache runs out, and a toast says so once. Run out, it reads `cache
   expired · next prompt rebuilds it` in red instead of `cache cold`.
-- `/hud` shows what the countdown counts from: the cache's lifetime, when
-  the main conversation's last request was sent, and when the cache runs
-  out.
 
 ### Fixed
 

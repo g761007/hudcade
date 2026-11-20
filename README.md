@@ -5,10 +5,11 @@
 **A pixel-art HUD for Claude Code.**
 
 Context, cost, cache, agents and rate limits at a glance,<br>
+a step-by-step replay of every turn, a one-click handoff when context runs low,<br>
 and little 8-bit scenes that play while Claude thinks.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Claude Code](https://img.shields.io/badge/Claude%20Code-%E2%89%A5%202.1.290-d97757)](https://code.claude.com)
+[![Claude Code](https://img.shields.io/badge/Claude%20Code-%E2%89%A5%202.1.329-d97757)](https://code.claude.com)
 [![Built as a mod](https://img.shields.io/badge/built%20as%20a-mod-8b949e)](#how-it-works)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey)](#requirements)
 
@@ -24,8 +25,10 @@ Claude Code shows you the conversation. hudcade shows you everything happening a
 
 - **💸 Know what a turn costs while it runs.** Session cost, what this turn has added so far, and how close you are to the 5-hour and 7-day limits, with reset countdowns and a warning when your pace would hit one before it resets.
 - **🧠 See context filling up before auto-compact hits.** A colored context bar with tokens left, how often the session has compacted, and, once you pass the warning line, what is eating the window.
-- **⚡ Catch a broken prompt cache.** Hit ratio for the session. The last request is flagged when it missed, and a resumed session whose cache has expired says so, with the cost of rebuilding it.
+- **⚡ Catch a broken prompt cache, and keep a warm one.** Hit ratio for the session. The last request is flagged when it missed, and a resumed session whose cache has expired says so, with the cost of rebuilding it. While you are idle, a countdown shows how long the cache still holds the conversation, with a toast five minutes before it runs out.
 - **🤖 Keep track of your agents.** A live line under each running Agent call, a pane with every agent and its task, and rows for agent-team teammates, background shells and scheduled loops.
+- **⏪ Replay a turn.** Step through what the last turn did, call by call: the arguments, the outcome, the start of what each call answered, the diff an edit asked for, and each subagent's own calls.
+- **🔁 Hand off before context runs out.** One button saves a summary of where the work stands, clears the conversation and starts over with the summary.
 - **🕹️ Make waiting fun.** The spinner becomes one of ten little 8-bit scenes that react to what Claude is doing.
 - **📱 Walk away.** A Telegram message when a turn finishes, when Claude needs your approval, when a turn fails, or when the background agents it left running are all done.
 
@@ -65,14 +68,15 @@ Above the prompt, in the terminal and in the desktop app. Each row has a left an
 |---|---|
 | **Identity** | Model and effort · project and branch (dirty, ahead/behind) · lines added and removed and files edited this session · session cost, what this turn added, session time |
 | **Capacity** | Context bar, tokens left and compactions · prompt-cache hit ratio, and while idle how long the cache still holds the conversation, counted from the main conversation's last request (`⏳42m`; amber, with a toast, in its last five minutes; then, in red, `cache expired · next prompt rebuilds it`) · 5-hour and 7-day limits with reset countdowns, and a forecast once your pace heads past 75% (`→92%`, or `→full in 50m`) |
-| **Activity** | Working, waiting for your approval, or idle (interrupted or failed, when the last turn ended so) · turn number, start time (and end time once done) · the tool running now · tokens in and out this turn · output speed · tool calls and failures · task progress |
+| **Activity** | Working, waiting for your approval, or idle (interrupted or failed, when the last turn ended so) · turn number, start time (and end time once done) · the tool running now · tokens in and out this turn · output speed · tool calls and failures · task progress · once a turn that called tools has ended, `▶ /hud replay (8 steps)` |
 | **Step recap** | One line on what the turn is doing, written by a small model as its steps go by. Off unless you turn on `recap`. |
 | **Context breakdown** | The largest parts of the window. Only appears once context passes the warning threshold. |
 | **Workers** | Teammates, background tasks and loops, while there are any. Subagents are in Claude Code's own list under the prompt. |
+| **Handoff** | Once context reaches `handoffPercent`, while idle: a `⇢ handoff` button. While a handoff runs, the step it is on. |
 
 While hudcade's spinner runs in the terminal, the band leaves it the turn's clock, output tokens, speed, tool calls and cost, so nothing shows twice.
 
-Toasts warn you when context crosses its thresholds, and before a model switch that would throw away a warm prompt cache. The toast includes what rebuilding it will cost.
+Toasts warn you when context crosses its thresholds, five minutes before the prompt cache runs out, and before a model switch that would throw away a warm prompt cache. The model-switch toast includes what rebuilding the cache will cost.
 
 ### Subagents
 
@@ -147,7 +151,7 @@ Summary: Added a retry policy with exponential backoff and covered it with 6 tes
 Session: 11fa1a35
 ```
 
-Messages are sent in three cases:
+Messages are sent in four cases:
 
 - **A turn completes.** Turns you interrupt and subagent turns are skipped.
 - **A permission prompt is waiting.**
@@ -197,6 +201,7 @@ hudcade is a **mod**: a plugin of function hooks that runs inside Claude Code it
 - **No statusline script.** Nothing is spawned on every refresh, and no transcript files are parsed.
 - **It reads the engine directly.** Usage, cost and rate limits come from `$.session.usage()`. Tool calls, subagents and tasks come from `tool.call` and the session events. Tokens, cache reads and output speed come from the model's own response stream.
 - **The drawing goes through Claude Code's UI.** The band is drawn with the UI's elements. The scenes are a `Raster` repainted about twelve times a second while a turn runs, and only then.
+- **Actions go through the engine too.** The replay notes each tool call at `tool.call`, before it runs. The handoff summary comes from `$.model.fork`, which reads the conversation from the prompt cache without adding to it; the clear and the first prompt go through `$.command.run` and `$.prompt.submit`. The last replay of each project, and a threshold set with `/hud handoff-at`, are kept in the mod's own store.
 - **The logic is plain TypeScript, separate from the hooks.** The HUD model, the layout, the scenes and the messages are pure functions, covered by tests that also mount the band on the terminal and desktop surfaces.
 
 ## Requirements
@@ -214,11 +219,16 @@ hudcade is a **mod**: a plugin of function hooks that runs inside Claude Code it
 - **Before the first reply** of a session, Claude Code has no context or rate-limit readings yet. The band says so instead of showing zeros.
 - **On Team and Enterprise plans**, Claude Code's built-in `cc-plugin-sec-default` runs ahead of every installed plugin and passes all classic hook events over, so hudcade's `classic.*` hooks never run (Claude Code says so in a line per hook). Native events cover agent rows, compactions, the cache lifetime, permission prompts (inferred from the permission check, and sent after 1.5 seconds) and `/clear`. Nothing native carries the session title, background tasks and loops, the model-switch toast or a resumed session's cold cache, so those stay empty there.
 - **Hooking tool calls** turns off Claude Code's move of a running tool to the background (Ctrl+B) while the mod is loaded.
+- **The replay** keeps the last turn that called tools, per project. What a call answered is cut to 40 lines and a diff to 300 lines. A diff is worked out from the file as it stood before the call; an Edit whose text is not in the file shows its own two texts instead.
+- **The handoff button** takes a click, or the keyboard once the band has it (Ctrl+X, then Tab, then `h`).
+- **`/hud handoff-at`** applies to every project, over a project's own `handoffPercent`. `/hud handoff-at default` lifts it.
 
 ## Troubleshooting
 
 - **Nothing shows.** Run `/hud` to see what the HUD has read and any reading that failed. For more detail, start `claude --debug` and look for lines starting with `hudcade:`.
 - **No Telegram message.** `/hud` tells you whether Telegram is configured. Then try `/hud test-notify`.
+- **`/hud replay` says there is nothing to replay.** The mod records a turn as it runs, so a turn that called tools has to end after the mod loaded. A session with no replay of its own opens the project's last one, from an earlier session.
+- **A handoff stopped.** The toast says why. Until the summary is saved, the conversation is left as it was; after that, the toast names the file.
 
 ## Development
 
@@ -227,7 +237,7 @@ hudcade is a **mod**: a plugin of function hooks that runs inside Claude Code it
 plugin/                           the mod
   .claude-plugin/plugin.json      manifest and options
   hooks/register.tsx              every hook
-  src/core/                       pure logic: HUD model, band layout, config, messages
+  src/core/                       pure logic: HUD model, band layout, config, messages, replay, diffs, handoff
   src/core/scenes/                one file per spinner scene
   types/index.d.ts                the session-state contract
   tests/                          unit and drawing tests
@@ -241,6 +251,8 @@ claude plugin test plugin                 # tests, terminal and desktop surfaces
 claude --plugin-dir ./plugin              # run your working copy; saving a file reloads it
 bun scripts/render-assets.ts              # regenerate the README images (Bun + ImageMagick)
 ```
+
+To run the working copy in every session, the desktop app's included, put its absolute path in `CLAUDE_CODE_PLUGIN_DIRS` in the `env` block of `~/.claude/settings.json`, and turn the installed copy off so it does not load twice. A terminal session then reloads the mod whenever a file in it is saved.
 
 All hooks live in one file because of two engine rules:
 

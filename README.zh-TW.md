@@ -5,10 +5,11 @@
 **Claude Code 的像素風 HUD。**
 
 context、成本、快取、agent、用量上限一眼看完，<br>
+每個回合都能逐步重播，context 快滿時一鍵交接，<br>
 Claude 思考的時候，還有 8-bit 小動畫陪你等。
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Claude Code](https://img.shields.io/badge/Claude%20Code-%E2%89%A5%202.1.290-d97757)](https://code.claude.com)
+[![Claude Code](https://img.shields.io/badge/Claude%20Code-%E2%89%A5%202.1.329-d97757)](https://code.claude.com)
 [![Built as a mod](https://img.shields.io/badge/built%20as%20a-mod-8b949e)](#運作方式)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey)](#系統需求)
 
@@ -24,8 +25,10 @@ Claude Code 顯示的是對話內容；hudcade 讓你看到對話以外的所有
 
 - **💸 回合還在跑，就知道花了多少錢**：session 累計成本、這回合目前增加的金額，以及距離 5 小時、7 天用量上限還有多遠，附重置倒數；照目前速度會在重置前用完時，也會提醒你。
 - **🧠 自動壓縮前就看到 context 快滿了**：彩色進度條顯示剩餘 token 和壓縮次數。超過警告線後，還會列出是哪些內容在佔用 context。
-- **⚡ 快取失效馬上發現**：顯示整個 session 的 prompt 快取命中率，最近一次沒命中時會特別標出來。resume 時如果快取已經過期，也會直接告訴你，並附上重建快取的費用。
+- **⚡ 快取失效馬上發現，也知道還能撐多久**：顯示整個 session 的 prompt 快取命中率，最近一次沒命中時會特別標出來。resume 時如果快取已經過期，也會直接告訴你，並附上重建快取的費用。閒置時會倒數快取還能保留多久，剩 5 分鐘時跳出提醒。
 - **🤖 掌握你的 agent**：每個執行中的 Agent 呼叫下方有一行即時狀態，另有側邊 pane 列出所有 agent 和各自的任務；Agent Teams 隊友、背景指令、排程也各自一行。
+- **⏪ 重播剛才的回合**：一步一步看上一回合做了什麼，包括每次呼叫的參數、結果、回傳內容的開頭、修改的 diff，以及每個 subagent 自己做的步驟。
+- **🔁 context 快滿前一鍵交接**：按一下就把目前的工作狀況寫成摘要存起來，清空對話後接著用摘要繼續。
 - **🕹️ 等待也變有趣**：等待動畫換成 10 組 8-bit 小場景之一，畫面會跟著 Claude 正在做的事變化。
 - **📱 放心離開座位**：回合完成、需要你確認權限、回合失敗，或回合留下的背景 agent 都結束時，都會發 Telegram 通知給你。
 
@@ -65,14 +68,15 @@ claude plugin install hudcade@hudcade
 |---|---|
 | **身分** | model 與 effort · 專案與 branch（是否有未提交的修改、領先或落後幾個 commit）· 這個 session 增刪的行數與修改過的檔案數 · session 成本、這回合增加的金額、session 時長 |
 | **容量** | context 進度條、剩餘 token、壓縮次數 · prompt 快取命中率，閒置時另外顯示快取還能保留多久，從主對話最後一次送出請求開始算，subagent 的請求不算（`⏳42m`；剩 5 分鐘內變黃色並跳出提醒；過期後以紅色顯示 `cache expired · next prompt rebuilds it`）· 5 小時與 7 天用量上限及重置倒數；照目前速度會超過 75% 時顯示預測（`→92%`，或 `→full in 50m`） |
-| **活動** | 工作中、等待你確認權限或閒置（上一回合被中斷或失敗時會標示出來）· 回合數、開始時間（結束後顯示開始與結束時間）· 正在執行的工具 · 本回合送出與收到的 token · 輸出速度 · 工具呼叫次數與失敗數 · task 進度 |
+| **活動** | 工作中、等待你確認權限或閒置（上一回合被中斷或失敗時會標示出來）· 回合數、開始時間（結束後顯示開始與結束時間）· 正在執行的工具 · 本回合送出與收到的 token · 輸出速度 · 工具呼叫次數與失敗數 · task 進度 · 呼叫過工具的回合結束後，顯示 `▶ /hud replay (8 steps)` |
 | **逐步摘要** | 由小模型隨著工具步驟寫出的一行摘要，說明這回合正在做什麼。要開啟 `recap` 才會出現 |
 | **context 組成** | 佔用 context 最多的幾個部分。只在超過警告門檻時出現 |
 | **工作者** | 隊友、背景任務、排程。有資料時才出現。subagent 由 Claude Code 自己在輸入框下方列出 |
+| **交接** | context 達到 `handoffPercent` 且閒置時，出現 `⇢ handoff` 按鈕；交接進行中則顯示目前進行到哪一步 |
 
 終端機裡 hudcade 的等待動畫在跑時，回合經過時間、輸出 token、速度、工具次數和花費都交給等待動畫顯示，資訊列不會重複顯示。
 
-context 超過門檻時，會跳出提示提醒你。切換 model 會讓仍然有效的 prompt 快取失效時，也會先提醒你，並附上重建快取的費用。
+context 超過門檻、prompt 快取剩 5 分鐘就到期時，會跳出提示提醒你。切換 model 會讓仍然有效的 prompt 快取失效時，也會先提醒你，並附上重建快取的費用。
 
 ### Subagent
 
@@ -226,6 +230,10 @@ hudcade 是一個 **mod**，也就是由 function hooks 組成、直接在 Claud
   - 工具呼叫、subagent、task：來自 `tool.call` 和 session 事件
   - token、快取讀取量、輸出速度：來自模型本身的回應串流
 - **透過 Claude Code 的 UI 繪製**：資訊列用 Claude Code 自己的 UI 元件繪製。場景是一個 `Raster`，只在回合進行中才會每秒更新約十二次。
+- **動作也透過引擎完成**：
+  - 回合重播在每次工具呼叫執行前，從 `tool.call` 記下這一步
+  - 交接摘要來自 `$.model.fork`，它從快取讀取對話內容，不會加進原本的對話；清空對話和送出第一句分別透過 `$.command.run` 和 `$.prompt.submit`
+  - 每個專案最後一次的重播，以及用 `/hud handoff-at` 設定的門檻，存在 mod 自己的 store
 - **邏輯與 hooks 分開，全部是純 TypeScript**：HUD 狀態、版面、場景和通知訊息都是純函式，並有測試涵蓋；測試也會實際在終端機和桌面版兩種畫面上 mount 資訊列。
 
 ## 系統需求
@@ -245,11 +253,16 @@ hudcade 是一個 **mod**，也就是由 function hooks 組成、直接在 Claud
   - 由 native 事件補上：agent 列、壓縮次數、快取保留時間、權限確認（從權限檢查推斷，1.5 秒後才通知）、`/clear`。
   - 沒有 native 來源，在這種環境會維持空白：session 標題、背景任務與排程、切換 model 的提示、續接 session 時的冷快取。
 - **攔截工具呼叫**：mod 載入期間，Claude Code 無法把執行中的工具移到背景（Ctrl+B）。
+- **回合重播**：每個專案只保留最後一個呼叫過工具的回合。呼叫的回傳內容最多保留 40 行，diff 最多 300 行。diff 是用工具執行前的檔案內容算出來的；如果 Edit 要替換的文字不在檔案裡，會改為顯示它原本的兩段文字。
+- **交接按鈕**：要用滑鼠點，或先讓資訊列取得鍵盤焦點（按 Ctrl+X 再按 Tab）後按 `h`。
+- **`/hud handoff-at`**：設定的值對所有專案都有效，而且優先於專案自己的 `handoffPercent`。用 `/hud handoff-at default` 可以取消。
 
 ## 疑難排解
 
 - **畫面沒有出現任何東西**：執行 `/hud`，查看 HUD 讀到的資料和讀取失敗的項目。需要更多細節時，用 `claude --debug` 啟動，再找以 `hudcade:` 開頭的訊息。
 - **沒有收到 Telegram 通知**：`/hud` 會顯示 Telegram 是否已設定，接著試試 `/hud test-notify`。
+- **`/hud replay` 顯示沒有可以重播的內容**：重播是 mod 在回合進行中記錄的，所以要在 mod 載入之後，有一個呼叫過工具的回合跑完才看得到。如果這個 session 自己還沒有重播，會改為開啟這個專案在之前 session 留下的最後一次重播。
+- **交接中途停止**：提醒訊息會說明原因。摘要存檔之前停止，對話會維持原樣；存檔之後才停止，提醒裡會附上摘要檔的路徑。
 
 ## 開發
 
@@ -258,7 +271,7 @@ hudcade 是一個 **mod**，也就是由 function hooks 組成、直接在 Claud
 plugin/                           mod 本體
   .claude-plugin/plugin.json      外掛設定與選項
   hooks/register.tsx              所有 hook
-  src/core/                       純邏輯：HUD 狀態、資訊列版面、設定、通知訊息
+  src/core/                       純邏輯：HUD 狀態、資訊列版面、設定、通知訊息、回合重播、diff、交接
   src/core/scenes/                等待動畫場景，一組一個檔案
   types/index.d.ts                session 狀態的型別契約
   tests/                          單元測試與畫面測試
@@ -272,6 +285,8 @@ claude plugin test plugin                 # 測試，涵蓋終端機與桌面版
 claude --plugin-dir ./plugin              # 直接執行工作中的版本，存檔就會重新載入
 bun scripts/render-assets.ts              # 重新產生 README 圖片（需要 Bun 與 ImageMagick）
 ```
+
+想讓每個 session（包括桌面版 app 的）都執行工作中的版本，可以把它的絕對路徑寫進 `~/.claude/settings.json` 的 `env` 區塊裡的 `CLAUDE_CODE_PLUGIN_DIRS`，並停用已安裝的版本，避免載入兩份。之後終端機 session 只要這個資料夾裡有檔案存檔，就會重新載入 mod。
 
 所有 hook 都集中在同一個檔案裡，因為引擎有兩條規則：
 
