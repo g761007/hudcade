@@ -9,7 +9,6 @@ export type SceneChoice = 'random' | SceneName
 
 export type ModsConfig = {
   hud: boolean
-  statusLine: boolean
   spinner: boolean
   spinnerScene: SceneChoice
   ctxWarnPercent: number
@@ -26,7 +25,6 @@ export type ModsConfig = {
 
 export const DEFAULTS: ModsConfig = {
   hud: true,
-  statusLine: true,
   spinner: true,
   spinnerScene: 'random',
   ctxWarnPercent: 60,
@@ -44,7 +42,6 @@ const SCENE_CHOICES: readonly SceneChoice[] = ['random', ...SCENE_NAMES]
 // Secrets stay out of project files: only these keys may be overridden there.
 const PROJECT_KEYS = [
   'hud',
-  'statusLine',
   'spinner',
   'spinnerScene',
   'ctxWarnPercent',
@@ -107,7 +104,6 @@ function apply(
 function set(config: ModsConfig, key: string, value: unknown): string | undefined {
   switch (key) {
     case 'hud':
-    case 'statusLine':
     case 'spinner':
     case 'recap':
     case 'notify':

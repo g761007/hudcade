@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import type { Hud } from '../types'
-import { agentSummary, buildBand, displayWidth, paneRows, rowText, statusLine } from '../src/core/band'
+import { agentSummary, buildBand, displayWidth, paneRows, rowText } from '../src/core/band'
 import { parseEnvFile, resolveConfig } from '../src/core/config'
 import { bar, clock, compactDuration, modelLabel, msUntil, parseTzOffset, preciseDuration, sanitize, sparkline, tokens, toolDetail, wallClock } from '../src/core/format'
 import { cleanRecap, recapRequest } from '../src/core/recap'
@@ -25,6 +25,7 @@ import {
   patchCounts,
   setCtxTop,
   setTeammates,
+  setWaiting,
   setWorkers,
   completeTurn,
   emptyHud,
@@ -35,6 +36,7 @@ import {
   parseGitStatus,
   pauseAgent,
   pruneAgents,
+  rateForecast,
   reconcileAgents,
   resumeAgent,
   spawnAgent,
@@ -43,7 +45,7 @@ import {
   taskCreated,
   taskUpdated,
 } from '../src/core/hud-model'
-import { buildMessage, resolveLanguage, summarize, type NotifyFacts } from '../src/core/telegram'
+import { agentList, buildMessage, resolveLanguage, summarize, type NotifyFacts } from '../src/core/telegram'
 
 describe('format', () => {
   test('durations read the way the band and messages show them', () => {
@@ -288,8 +290,9 @@ describe('band', () => {
     return h
   }
 
-  test('rows: identity, capacity, activity, then workers', () => {
-    const [identity, capacity, activity, agent] = texts(busyHud())
+  test('rows: identity, capacity, activity; subagents are left to Claude Code’s own list', () => {
+    const rows = texts(busyHud())
+    const [identity, capacity, activity] = rows
     expect(identity).toContain('Opus 5.5 · xhigh')
     expect(identity).toContain('main* ↑2')
     expect(identity).toContain('$0.43')
@@ -299,8 +302,8 @@ describe('band', () => {
     expect(capacity).toContain('7d')
     expect(activity).toContain('working 0:59')
     expect(activity).toContain('Bash')
-    expect(agent).toContain('agent')
-    expect(agent).toContain('Explore')
+    expect(rows).toHaveLength(3)
+    expect(rows.some(r => r.includes('Explore'))).toBe(false)
   })
 
   test('a running turn shows when it started; a finished one its start, end and length', () => {
@@ -317,6 +320,48 @@ describe('band', () => {
     const [identity, capacity] = buildBand(busyHud(), 60_000, 200, OPTIONS)
     expect(identity!.right.map(s => s.text).join('')).toContain('$0.43')
     expect(capacity!.right.map(s => s.text).join('')).toContain('13%')
+  })
+
+  test('while the terminal spinner runs, the band leaves it the turn’s clock, output, speed, tool calls and cost', () => {
+    let h = addRequestUsage(busyHud(), { input_tokens: 400, output_tokens: 900, cache_read_input_tokens: 11_000, cache_creation_input_tokens: 0 }, 18_000)
+    h = endTool(h, 't', true)
+    h = { ...h, costUsd: 1.43, turn: { ...h.turn, costAtStart: 0.43 } }
+    const band = (h: Hud) => buildBand(h, 60_000, 200, { ...OPTIONS, hasSpinner: true }).map(rowText)
+
+    const [identity, , activity] = band(h)
+    expect(identity).toContain('$1.43')
+    expect(identity).not.toContain('+1.00')
+    expect(activity).toContain('working · turn 1')
+    expect(activity).toContain('↑11k')
+    expect(activity).not.toContain('↓')
+    expect(activity).not.toContain('tok/s')
+    expect(activity).toContain('tools ✗1')
+    expect(activity).not.toContain('tools 1')
+
+    // Without a spinner (the desktop), or waiting for the person (no spinner then), all of it is back.
+    const [plainIdentity, , plainActivity] = texts(h)
+    expect(plainIdentity).toContain('$1.43 +1.00')
+    expect(plainActivity).toMatch(/working 0:59 · turn 1.*↑11k ↓900 · 50 tok\/s · tools 1 ✗1/)
+    expect(band(setWaiting(h, true))[2]).toContain('waiting for you 0:59')
+  })
+
+  test('the turn’s cost is not repeated while it is all the session has spent', () => {
+    const h = { ...busyHud(), costUsd: 3.79 }
+    expect(texts({ ...h, turn: { ...h.turn, costAtStart: 0 } })[0]).not.toContain('+3.79')
+    expect(texts({ ...h, turn: { ...h.turn, costAtStart: 1.79 } })[0]).toContain('$3.79 +2.00')
+  })
+
+  test('a rate limit forecasts its use at the reset once it heads past 75%', () => {
+    const HOUR = 3_600_000
+    const resetsIn = (ms: number) => String((60_000 + ms) / 1000)
+    const capacity = (percent: number, ms: number) =>
+      texts(applyUsage(emptyHud('p'), { rateLimits: [{ kind: 'five_hour', percentUsed: percent, resetsAt: resetsIn(ms) }] }))[1]
+    // 40% over 2h30m of the 5h window: 80% by the reset.
+    expect(capacity(40, 2.5 * HOUR)).toContain('40% 2h30m →80%')
+    // 20% over 2h: 50%, not worth a mark.
+    expect(capacity(20, 3 * HOUR)).not.toContain('→')
+    // 75% over 3h: full an hour from now.
+    expect(capacity(75, 2 * HOUR)).toContain('75% 2h00m →full in 1h00m')
   })
 
   test('every row fits the width, dropping the least important parts first', () => {
@@ -389,10 +434,9 @@ describe('band', () => {
   })
 
   test('worker rows are capped with a count of the rest', () => {
-    let h = emptyHud('p')
-    for (let i = 0; i < 6; i++) h = launchAgent(h, { toolUseId: `t${i}`, type: `A${i}`, description: '', isBackground: false, now: i })
-    const rows = texts(h)
-    expect(rows.filter(r => r.includes('agent')).length).toBe(3)
+    const tasks = Array.from({ length: 6 }, (_, i) => ({ id: `b${i}`, type: 'bash', status: 'running', description: `job ${i}` }))
+    const rows = texts(setWorkers(emptyHud('p'), tasks, []))
+    expect(rows.filter(r => r.includes('» job')).length).toBe(3)
     expect(rows.some(r => r.includes('+3 more'))).toBe(true)
   })
 
@@ -417,20 +461,16 @@ describe('band', () => {
   })
 
   test('an agent row shows the time the agent worked, not how long it has been listed', () => {
+    const pane = (h: Hud, now: number) => paneRows(h, now).map(row => row.map(seg => seg.text).join(''))
     let h = launchAgent(emptyHud('p'), { toolUseId: 'tu1', type: 'Plan', description: '', isBackground: true, now: 0 })
     h = agentResult(h, 'tu1', { agentId: 'ag1', isLaunchOnly: true, isError: false }, 1_000)
     h = pauseAgent(h, 'ag1', 12_000)
-    const row = texts(h, 200, 64 * 3_600_000).find(r => r.includes('Plan'))
+    const row = pane(h, 64 * 3_600_000).find(r => r.includes('Plan'))
     expect(row).toContain('· 0:12 ·')
     // A row an older version of the mod wrote has no work time yet.
     const legacy = { key: 'tu:t', toolUseId: 't', type: 'Old', description: '', isBackground: false, startedAt: 0, tools: 1, status: 'running' }
-    const old = texts({ ...emptyHud('p'), agents: [legacy] } as unknown as Hud, 200, 64 * 3_600_000)
+    const old = pane({ ...emptyHud('p'), agents: [legacy] } as unknown as Hud, 64 * 3_600_000)
     expect(old.find(r => r.includes('Old'))).toContain('· 0:00 ·')
-  })
-
-  test('the line under the prompt carries model, effort, context, cost and 5h/7d usage', () => {
-    expect(statusLine(busyHud())).toBe('Opus 5.5 · xhigh │ ctx 9% │ $0.43 │ 5h 13% │ 7d 38%')
-    expect(statusLine(emptyHud('p'))).toBe('Claude │ ctx —')
   })
 
   test('context color follows the thresholds', () => {
@@ -457,6 +497,22 @@ describe('telegram', () => {
     summary: 'done & dusted',
     sessionId: '11fa1a35-c235',
   }
+
+  test('the background agents’ notice lists each agent and how it ended', () => {
+    const list = agentList([
+      { label: 'Explore · find auth usages', status: 'done' },
+      { label: 'Plan · <draft>', status: 'failed' },
+      { label: 'general-purpose', status: 'stopped' },
+      { label: 'pruned' },
+    ])
+    expect(list).toBe('✓ Explore · find auth usages\n✗ Plan · <draft>\n⏹ general-purpose\n✓ pruned')
+    expect(agentList(Array.from({ length: 10 }, (_, i) => ({ label: `a${i}`, status: 'done' })), 8).split('\n').at(-1)).toBe('…+2')
+    const text = buildMessage({ ...FACTS, kind: 'agents', summary: undefined, durationMs: undefined, detail: list })
+    expect(text).toContain('<b>🤖 Claude Code’s background agents are done</b>')
+    expect(text).toContain('\n✗ Plan · &lt;draft&gt;\n')
+    expect(text).not.toContain('Details:')
+    expect(buildMessage({ ...FACTS, kind: 'agents', language: 'zh-TW', detail: list })).toContain('🤖 Claude Code 的背景 agent 都結束了')
+  })
 
   test('English messages carry every field and escape HTML', () => {
     const text = buildMessage(FACTS)
@@ -682,13 +738,35 @@ describe('agent rows, native and classic', () => {
     expect(same).toBe(h)
   })
 
-  test('an ended row is shown for a minute, whether or not anything prunes it', () => {
+  test('an ended row is kept for a minute', () => {
     const h = reportAgent(spawnAgent(emptyHud('p'), { toolUseId: 'tu', agentId: 'ag1', type: 'Explore', now: 0 }), 'ag1', 'completed', 1_000)
     expect(isAgentShown(h.agents[0]!, 60_999)).toBe(true)
     expect(isAgentShown(h.agents[0]!, 61_000)).toBe(false)
-    const band = (now: number) => buildBand(h, now, 200, { warnPercent: 60, criticalPercent: 80 }).map(rowText).join('\n')
-    expect(band(30_000)).toContain('✓ Explore')
-    expect(band(61_000)).not.toContain('Explore')
+    expect(pruneAgents(h.agents, 61_000)).toEqual([])
+  })
+})
+
+describe('rate limit forecast', () => {
+  const HOUR = 3_600_000
+  const at = (ms: number) => String(ms / 1000)
+
+  test('projects the pace since the window opened to its reset', () => {
+    // 5h window resetting in 3h: 2h gone, 40% used → 20%/h → 100% at the reset.
+    const f = rateForecast({ kind: 'five_hour', percent: 40, resetsAt: at(3 * HOUR) }, 0)!
+    expect(Math.round(f.atResetPercent)).toBe(100)
+    expect(f.fullInMs).toBe(3 * HOUR)
+    // 7d window: 3.5 days gone, 30% used → 60% at the reset, never full.
+    const week = rateForecast({ kind: 'seven_day', percent: 30, resetsAt: at(84 * HOUR) }, 0)!
+    expect(Math.round(week.atResetPercent)).toBe(60)
+    expect(week.fullInMs).toBeUndefined()
+  })
+
+  test('says nothing of a window too young, unused, full, of unknown length or with no reset', () => {
+    expect(rateForecast({ kind: 'five_hour', percent: 10, resetsAt: at(4.6 * HOUR) }, 0)).toBeUndefined()
+    expect(rateForecast({ kind: 'five_hour', percent: 0, resetsAt: at(HOUR) }, 0)).toBeUndefined()
+    expect(rateForecast({ kind: 'five_hour', percent: 100, resetsAt: at(HOUR) }, 0)).toBeUndefined()
+    expect(rateForecast({ kind: 'spend_limit', percent: 50, resetsAt: at(HOUR) }, 0)).toBeUndefined()
+    expect(rateForecast({ kind: 'five_hour', percent: 50 }, 0)).toBeUndefined()
   })
 })
 

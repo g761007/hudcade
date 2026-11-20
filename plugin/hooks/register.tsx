@@ -1,5 +1,5 @@
-// hudcade: a HUD band with session and agent progress, a status line, a
-// pixel-scene spinner (terminal), and Telegram notifications.
+// hudcade: a HUD band with session and agent progress, a pixel-scene spinner
+// (terminal), and Telegram notifications.
 //
 // The engine admits one hook per event in a module and follows `$` only into
 // functions of the same file, so every hook lives here and dispatches to the
@@ -8,8 +8,8 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, Timer } from 'claude-code'
 
-import type { Hud, SceneName } from '../types'
-import { agentSummary, buildBand, paneRows, statusLine, type Seg } from '../src/core/band'
+import type { AgentRun, Hud, SceneName } from '../types'
+import { agentSummary, buildBand, paneRows, type Seg } from '../src/core/band'
 import { createRuntime, parseEnvFile, resolveConfig, type Layer, type Runtime } from '../src/core/config'
 import { basename, clock, modelLabel, parseTzOffset, tokens, toolDetail, toolLabel, truncate, usd } from '../src/core/format'
 import { cleanRecap, recapRequest, type RecapStep } from '../src/core/recap'
@@ -27,7 +27,6 @@ import {
   emptyHud,
   endTool,
   finishAgent,
-  isAgentShown,
   launchAgent,
   linkAgent,
   noteCompaction,
@@ -52,7 +51,7 @@ import {
   withDefaults,
   type UsageInput,
 } from '../src/core/hud-model'
-import { buildMessage, resolveLanguage, summarize, type NotifyKind, type NotifyLanguage } from '../src/core/telegram'
+import { agentList, buildMessage, resolveLanguage, summarize, type NotifyKind, type NotifyLanguage } from '../src/core/telegram'
 
 // The one session value the drawings read: a write redraws the band and the spinner.
 const hudAtom = atom({ plugin: 'hudcade', key: 'hud' } as const, emptyHud(''))
@@ -64,8 +63,7 @@ const AGENT_SYNC_MS = 15_000
 const FRAME_MS = 80
 const SPINNER_TEXT_COLUMNS = 36
 const AGENTS_PANE = 'hudcade-agents'
-// While idle, the band redraws this often for the cache countdown and the
-// agent rows that are about to go.
+// While idle, the band redraws this often for the cache countdown.
 const IDLE_REDRAW_MS = 15_000
 // An ask the mode gives to no classifier within this time is the person's.
 const ASK_SETTLE_MS = 1_500
@@ -74,6 +72,9 @@ const ASK_SETTLE_MS = 1_500
 const NOTIFY_DEDUPE_MS = 15_000
 const COMPACTION_DEDUPE_MS = 30_000
 const RECAP_MIN_INTERVAL_MS = 10_000
+// Background agents all ended stay so this long before Telegram hears, as a
+// workflow may start its next one.
+const AGENTS_SETTLE_MS = 10_000
 
 type NotifyExtra = { durationMs?: number; summary?: string; detail?: string }
 
@@ -94,7 +95,6 @@ let values: Record<string, unknown> = {}
 let lastGitAt = 0
 let lastAgentSyncAt = 0
 let gitNote = 'not read yet'
-let lastStatus: string | undefined
 let ticker: Timer | undefined
 let warned: 'none' | 'warn' | 'critical' = 'none'
 let frameTimer: Timer | undefined
@@ -119,6 +119,9 @@ let recapTimer: Timer | undefined
 let isRecapping = false
 let isRecapDirty = false
 let lastRecapAt = Number.NEGATIVE_INFINITY
+// Background agents seen running while no turn ran, by row key: what each is.
+const awaitedAgents = new Map<string, string>()
+let agentsSettleTimer: Timer | undefined
 
 // ── Configuration ─────────────────────────────────────────────────────────
 
@@ -208,7 +211,7 @@ async function refreshAgents($: EngineInterface, isThrottled = false): Promise<v
     const agents = await $.agent.list()
     const h = await patch($, h => reconcileAgents(setTeammates(h, agents), agents, now))
     syncTicker($, h.turn.status !== 'idle' || h.agents.some(a => a.status === 'running'))
-    void syncIdleRedraw($)
+    watchBackgroundAgents($, h)
   } catch {
     // Agent teams off, or the roster unavailable: no teammate rows, and agent
     // rows wait for SubagentStop.
@@ -224,19 +227,6 @@ async function refreshContextBreakdown($: EngineInterface): Promise<void> {
   } catch {
     // The band shows no breakdown row.
   }
-}
-
-// Pins the compact line under the prompt; only a changed text is sent.
-async function syncStatus($: EngineInterface): Promise<void> {
-  if (!runtime.config.statusLine) {
-    if (lastStatus !== undefined) $.ui.status(undefined)
-    lastStatus = undefined
-    return
-  }
-  const text = statusLine(await snapshot($))
-  if (text === lastStatus) return
-  lastStatus = text
-  $.ui.status(text)
 }
 
 // Redraws once a second while something runs, for the elapsed clocks, and
@@ -362,6 +352,44 @@ async function notifyOnce($: EngineInterface, kind: NotifyKind, extra: NotifyExt
   notifyLater($, kind, extra)
 }
 
+// ── Background agents ─────────────────────────────────────────────────────
+
+function isRunningInBackground(a: AgentRun): boolean {
+  return a.isBackground && a.status === 'running'
+}
+
+// While no turn runs, the background agents still at work are awaited; once
+// they have all ended, Telegram hears, unless the person starts a turn first.
+function watchBackgroundAgents($: EngineInterface, h: Hud): void {
+  if (h.turn.status !== 'idle') return
+  const running = h.agents.filter(isRunningInBackground)
+  for (const a of running) awaitedAgents.set(a.key, a.description ? `${a.type} · ${a.description}` : a.type)
+  if (running.length > 0 || awaitedAgents.size === 0) {
+    agentsSettleTimer?.cancel()
+    agentsSettleTimer = undefined
+    return
+  }
+  agentsSettleTimer ??= $.clock.after(AGENTS_SETTLE_MS, () => {
+    agentsSettleTimer = undefined
+    void reportBackgroundAgents($)
+  })
+}
+
+async function reportBackgroundAgents($: EngineInterface): Promise<void> {
+  const h = await snapshot($)
+  if (h.turn.status !== 'idle' || h.agents.some(isRunningInBackground) || awaitedAgents.size === 0) return
+  // A row gone from the list has ended (only an ended one is pruned).
+  const ended = [...awaitedAgents].map(([key, label]) => ({ label, status: h.agents.find(a => a.key === key)?.status }))
+  awaitedAgents.clear()
+  notifyLater($, 'agents', { detail: agentList(ended) })
+}
+
+function forgetBackgroundAgents(): void {
+  awaitedAgents.clear()
+  agentsSettleTimer?.cancel()
+  agentsSettleTimer = undefined
+}
+
 // ── Waiting for the person ────────────────────────────────────────────────
 
 // The mode put a main-loop call to a person: the band says so and Telegram tells them.
@@ -395,15 +423,11 @@ async function countCompaction($: EngineInterface): Promise<void> {
   await patch($, h => noteCompaction(h))
 }
 
-// Redraws the idle band while it shows something that changes with time: the
-// cache countdown, or agent rows that are about to go.
+// Redraws the idle band while it counts down the prompt cache's lifetime.
 async function syncIdleRedraw($: EngineInterface): Promise<void> {
   const [h, now] = await Promise.all([snapshot($), $.clock.now()])
   const remaining = cacheRemainingMs(h.cache, now)
-  const isNeeded =
-    runtime.config.hud &&
-    h.turn.status === 'idle' &&
-    ((remaining !== undefined && remaining > 0) || h.agents.some(a => a.status !== 'running' && isAgentShown(a, now)))
+  const isNeeded = runtime.config.hud && h.turn.status === 'idle' && remaining !== undefined && remaining > 0
   if (isNeeded && !idleTimer) {
     idleTimer = $.clock.every(IDLE_REDRAW_MS, () => {
       $.ui.invalidate('ui.render')
@@ -545,7 +569,6 @@ export const register: Register = (on, options) => {
       note('session.usage', error)
     }
     await refreshGit($, true)
-    await syncStatus($)
     runtime.warnings.push(...failed)
     return next(e)
   })
@@ -558,7 +581,6 @@ export const register: Register = (on, options) => {
 
   on('session.measure', async ($, e, next) => {
     await applyMeasure($, { context: e.context, rateLimits: e.rateLimits, cost: e.cost })
-    await syncStatus($)
     return next(e)
   })
 
@@ -590,6 +612,7 @@ export const register: Register = (on, options) => {
     idleTimer = undefined
     clearAsks()
     resetRecap(e.text)
+    forgetBackgroundAgents()
 
     turnStartedAt = now
     toolsAtStart = h.tools.total
@@ -613,7 +636,6 @@ export const register: Register = (on, options) => {
       await patch($, h =>
         e.agentId ? setAgentModel(h, e.agentId, e.model) : { ...h, model: e.model, effort: effort ?? h.effort },
       )
-      if (!e.agentId) await syncStatus($)
     }
     const agentId = e.agentId
     if (agentId && hud.agents.some(a => a.agentId === agentId && a.status === 'running' && a.workingSince === undefined)) {
@@ -653,6 +675,7 @@ export const register: Register = (on, options) => {
       const now = await $.clock.now()
       const h = await patch($, h => completeTurn(h, e.durationMs, now, e.reason))
       syncTicker($, h.agents.some(a => a.status === 'running'))
+      watchBackgroundAgents($, h)
       stopFrames()
       clearAsks()
       recapTimer?.cancel()
@@ -662,7 +685,6 @@ export const register: Register = (on, options) => {
       void refreshAgents($)
       const percent = h.ctx?.percent
       if (percent !== undefined && percent >= runtime.config.ctxWarnPercent) void refreshContextBreakdown($)
-      await syncStatus($)
 
       const isLongEnough = e.durationMs >= runtime.config.notifyMinTurnSeconds * 1_000
       if (!e.isAborted && isLongEnough) {
@@ -674,8 +696,7 @@ export const register: Register = (on, options) => {
     } else {
       const now = await $.clock.now()
       const agentId = e.agentId
-      await patch($, h => agentTurnEnded(h, agentId, now))
-      void syncIdleRedraw($)
+      watchBackgroundAgents($, await patch($, h => agentTurnEnded(h, agentId, now)))
     }
     return next(e)
   })
@@ -768,7 +789,7 @@ export const register: Register = (on, options) => {
       const now = await $.clock.now()
       const isWorkflow = e.workflow !== undefined || (e.fork && !e.tool_use_id)
       const description = e.description || (e.workflow ? `workflow agent ${e.workflow.agentIndex}` : '')
-      await patch($, h =>
+      const h = await patch($, h =>
         spawnAgent(h, {
           toolUseId: e.tool_use_id,
           agentId,
@@ -781,6 +802,7 @@ export const register: Register = (on, options) => {
         }),
       )
       syncTicker($, true)
+      watchBackgroundAgents($, h)
       void refreshAgents($)
     } catch {
       // Bookkeeping never changes the spawn.
@@ -796,7 +818,7 @@ export const register: Register = (on, options) => {
       const now = await $.clock.now()
       const h = await patch($, h => reportAgent(h, e.agentId, e.status, now))
       syncTicker($, h.turn.status !== 'idle' || h.agents.some(a => a.status === 'running'))
-      void syncIdleRedraw($)
+      watchBackgroundAgents($, h)
     } catch {
       // Bookkeeping never changes the report.
     }
@@ -860,7 +882,7 @@ export const register: Register = (on, options) => {
     const now = await $.clock.now()
     const h = await patch($, h => (e.agent_id ? finishAgent(h, e.agent_id, now) : h))
     syncTicker($, h.turn.status !== 'idle' || h.agents.some(a => a.status === 'running'))
-    void syncIdleRedraw($)
+    watchBackgroundAgents($, h)
     return next(e)
   })
 
@@ -950,6 +972,7 @@ export const register: Register = (on, options) => {
     const rows = buildBand(hud, now, Math.max(20, e.props.bodyColumns), {
       warnPercent: runtime.config.ctxWarnPercent,
       criticalPercent: runtime.config.ctxCriticalPercent,
+      hasSpinner: runtime.config.spinner && e.surface === 'terminal',
     }).slice(0, Math.max(1, e.props.maxRows))
     const { Box, Text } = $.ui.resolve(e)
     const texts = (segs: Seg[]) =>
@@ -1060,7 +1083,7 @@ function statusText(runtime: Runtime, hud: Hud): string {
   const onOff = (flag: boolean) => (flag ? 'on' : 'off')
   const lines = [
     'hudcade status',
-    `modules: hud ${onOff(config.hud)} · status line ${onOff(config.statusLine)} · spinner ${onOff(config.spinner)} (${config.spinnerScene}) · recap ${onOff(config.recap)} (${config.recapModel}) · notify ${onOff(config.notify)}`,
+    `modules: hud ${onOff(config.hud)} · spinner ${onOff(config.spinner)} (${config.spinnerScene}) · recap ${onOff(config.recap)} (${config.recapModel}) · notify ${onOff(config.notify)}`,
     `context thresholds: warn ${config.ctxWarnPercent}% · critical ${config.ctxCriticalPercent}%`,
     `config sources: ${runtime.sources.join(', ')}`,
     `telegram: ${runtime.telegramSource ? `configured (${runtime.telegramSource})` : 'not configured'} · language ${config.notifyLanguage}`,

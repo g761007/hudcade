@@ -9,7 +9,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { buildBand, displayWidth, statusLine, type Seg } from '../plugin/src/core/band'
+import { buildBand, displayWidth, type Seg } from '../plugin/src/core/band'
 import * as hud from '../plugin/src/core/hud-model'
 import { SCENE_NAMES, SCENES } from '../plugin/src/core/scenes'
 import { Canvas, CLEAR } from '../plugin/src/core/scenes/canvas'
@@ -161,23 +161,21 @@ function renderHudSvg(): string {
   for (const segs of spin) line(segs, tx)
   y += 10
 
-  // The band.
-  for (const row of buildBand(h, now, COLS, { warnPercent: 60, criticalPercent: 80 })) {
+  // The band, beside the spinner as the terminal draws it.
+  for (const row of buildBand(h, now, COLS, { warnPercent: 60, criticalPercent: 80, hasSpinner: true })) {
     const rightWidth = displayWidth(row.right.map(s => s.text).join(''))
     rows.push(`<text y="${y}" xml:space="preserve">${tspans(row.left, pad, cw)}</text>`)
     if (row.right.length) rows.push(`<text y="${y}" xml:space="preserve">${tspans(row.right, pad + (COLS - rightWidth) * cw, cw)}</text>`)
     y += lh
   }
 
-  // The prompt box and the status line under it.
+  // The prompt box.
   y += 4
   const ruleWidth = COLS * cw
   rows.push(`<rect x="${pad}" y="${y - 13}" width="${ruleWidth}" height="1" fill="#30363d"/>`)
   y += 8
   line([{ text: '❯ ', color: 'text' }, { text: '▌', color: 'suggestion' }])
   rows.push(`<rect x="${pad}" y="${y - 13}" width="${ruleWidth}" height="1" fill="#30363d"/>`)
-  y += 8
-  line([{ text: '  ' + statusLine(h), dim: true }])
 
   const width = Math.round(pad * 2 + COLS * cw)
   const height = Math.round(y + 6)

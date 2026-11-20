@@ -1,7 +1,8 @@
 // Pure state transitions of the HUD snapshot. Hooks feed events in through
 // `update($, hud, fn)`; nothing here touches `$`, so every rule is testable.
 
-import type { AgentRun, BackgroundTask, CacheStats, Cron, CtxSlice, Hud, TaskItem, Teammate, ToolRun, TurnState } from '../../types'
+import type { AgentRun, BackgroundTask, CacheStats, Cron, CtxSlice, Hud, RateWindow, TaskItem, Teammate, ToolRun, TurnState } from '../../types'
+import { msUntil } from './format'
 
 export const DONE_AGENT_TTL_MS = 60_000
 const TTL_MS = { '5m': 300_000, '1h': 3_600_000 } as const
@@ -161,6 +162,24 @@ export function setCacheTtl(h: Hud, ttl: '5m' | '1h'): Hud {
 export function cacheRemainingMs(cache: CacheStats | undefined, now: number): number | undefined {
   if (!cache?.ttl || cache.lastRequestAt === undefined) return undefined
   return cache.lastRequestAt + TTL_MS[cache.ttl] - now
+}
+
+const RATE_WINDOW_MS: Record<string, number> = { five_hour: 5 * 3_600_000, seven_day: 7 * 86_400_000 }
+// Before this share of a window has gone by, its pace says too little.
+const MIN_FORECAST_SHARE = 0.1
+
+// Where a rate-limit window ends up at the pace it has been used since it
+// opened: its use at the reset, and how soon it fills if it fills before.
+// undefined for a window of unknown length, unused, or too young to judge.
+export function rateForecast(rate: RateWindow, now: number): { atResetPercent: number; fullInMs?: number } | undefined {
+  const length = RATE_WINDOW_MS[rate.kind]
+  const remaining = msUntil(rate.resetsAt, now)
+  if (!length || remaining === undefined || rate.percent <= 0 || rate.percent >= 100) return undefined
+  const elapsed = length - remaining
+  if (elapsed < length * MIN_FORECAST_SHARE) return undefined
+  const perMs = rate.percent / elapsed
+  const atResetPercent = rate.percent + perMs * remaining
+  return { atResetPercent, fullInMs: atResetPercent >= 100 ? (100 - rate.percent) / perMs : undefined }
 }
 
 // Share of the session's input tokens served from the prompt cache.
@@ -511,7 +530,7 @@ export function setAgentModel(h: Hud, agentId: string, model: string): Hud {
   return { ...h, agents: h.agents.map(a => (a.agentId === agentId ? { ...a, model } : a)) }
 }
 
-// A row the band lists: running, or ended within the last minute.
+// A row still kept (for the agents pane): running, or ended within the last minute.
 export function isAgentShown(a: AgentRun, now: number): boolean {
   return a.status === 'running' || now - (a.endedAt ?? now) < DONE_AGENT_TTL_MS
 }
