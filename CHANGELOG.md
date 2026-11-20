@@ -5,7 +5,7 @@ All notable changes to hudcade are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.0] - 2026-11-20
 
 ### Added
 
@@ -148,6 +148,7 @@ The first release.
 - Toasts at the context warning and critical thresholds, and before a model
   switch that would throw away a warm prompt cache.
 
+[0.4.0]: https://github.com/g761007/hudcade/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/g761007/hudcade/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/g761007/hudcade/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/g761007/hudcade/compare/v0.1.1...v0.1.2
