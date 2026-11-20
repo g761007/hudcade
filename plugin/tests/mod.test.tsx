@@ -44,6 +44,24 @@ async function bandText($: Engine, surface: 'terminal' | 'desktop' = 'terminal')
   return texts.map(t => t.text).join('')
 }
 
+// The `/hud agents` pane: the agent rows live there, not on the band.
+function mountPane($: Engine, surface: 'terminal' | 'desktop' = 'terminal') {
+  return $.ui.mount({
+    plugin: PLUGIN,
+    surface,
+    component: 'Pane',
+    requestId: 'hudcade-agents',
+    props: { title: 'hudcade · agents', isFocused: false, bodyColumns: 80, placement: 'dock', scroll: { offset: 0, bodyRows: 20 }, view: {} },
+  } as never)
+}
+
+async function paneText($: Engine): Promise<string> {
+  const ui = await mountPane($)
+  const texts = await ui.findAll({ type: 'Text' })
+  await ui.unmount()
+  return texts.map(t => t.text).join('')
+}
+
 describe('band', () => {
   test('draws model, cost and progress on terminal and desktop', async ($, on) => {
     mock.clock(on)
@@ -57,12 +75,22 @@ describe('band', () => {
     await $.turn.start({ text: 'hi', turnId: 't1' })
     await $.tool.call({ tool: 'Bash', command: 'npm test', description: 'Run tests' } as never)
 
-    for (const surface of ['terminal', 'desktop'] as const) {
-      const ui = await $.ui.mount({ plugin: PLUGIN, surface, component: 'AbovePrompt', props: BAND_PROPS })
-      expect(await ui.find({ type: 'Text', text: /working/ })).toBeDefined()
-      expect(await ui.find({ type: 'Text', text: /tools 1/ })).toBeDefined()
-      await ui.unmount()
-    }
+    // The terminal's pixel spinner shows the turn's clock and tool calls; the desktop has none.
+    expect(await bandText($, 'desktop')).toMatch(/working \d+:\d\d.*tools 1/)
+    const terminal = await bandText($, 'terminal')
+    expect(terminal).toContain('working · turn 1')
+    expect(terminal).not.toContain('tools 1')
+  })
+
+  test('with the spinner off, the terminal band keeps the turn’s clock and tool calls', { options: { spinner: false } }, async ($, on) => {
+    mock.clock(on)
+    engineDraws(on)
+    on('turn.start', (_$, e) => ({ turnId: e.turnId }))
+    on('tool.call', () => ({ result: { stdout: '', stderr: '' }, text: '' }) as never)
+
+    await $.turn.start({ text: 'hi', turnId: 't1' })
+    await $.tool.call({ tool: 'Bash', command: 'npm test', description: 'Run tests' } as never)
+    expect(await bandText($, 'terminal')).toMatch(/working \d+:\d\d.*tools 1/)
   })
 
   // classic.SessionStart is passed over under a managed seat; the test raises none.
@@ -109,8 +137,8 @@ describe('agents', () => {
     on('agent.list', () => ({ value: [{ id: 'ag1', type: 'general-purpose', description: 'probe', status: roster() }] }) as never)
   }
 
-  async function bandShowsDone($: Engine, surface: 'terminal' | 'desktop'): Promise<boolean> {
-    const ui = await $.ui.mount({ plugin: PLUGIN, surface, component: 'AbovePrompt', props: BAND_PROPS })
+  async function paneShowsDone($: Engine, surface: 'terminal' | 'desktop'): Promise<boolean> {
+    const ui = await mountPane($, surface)
     expect(await ui.find({ type: 'Text', text: 'general-purpose' })).toBeDefined()
     const isDone = (await ui.find({ type: 'Text', text: '✓ ' })) !== undefined
     await ui.unmount()
@@ -124,11 +152,62 @@ describe('agents', () => {
     on('turn.complete', (_$, e) => ({ text: e.answer }) as never)
 
     await $.tool.call(BACKGROUND_AGENT)
-    for (const surface of ['terminal', 'desktop'] as const) expect(await bandShowsDone($, surface)).toBe(false)
+    for (const surface of ['terminal', 'desktop'] as const) expect(await paneShowsDone($, surface)).toBe(false)
 
     await $.turn.complete({ answer: 'ok', durationMs: 1_000, isAborted: false, turnId: 't1', reason: 'answer' } as never)
     await clock.settle()
-    for (const surface of ['terminal', 'desktop'] as const) expect(await bandShowsDone($, surface)).toBe(true)
+    for (const surface of ['terminal', 'desktop'] as const) expect(await paneShowsDone($, surface)).toBe(true)
+  })
+
+  // Telegram messages sent, and a background agent left running when the turn ends.
+  async function agentOutlivesTurn($: Engine, on: On): Promise<{ sent: string[] }> {
+    session(on)
+    const sent: string[] = []
+    on('http.fetch', (_$, e) => {
+      sent.push((JSON.parse(String(e.init?.body ?? '{}')) as { text: string }).text)
+      return { value: { status: 200, ok: true, headers: {}, text: '' } }
+    })
+    on('process.run', () => ({ value: { exitCode: 0, stdout: '2026-11-20 18:00:00 CST\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
+    on('turn.start', (_$, e) => ({ turnId: e.turnId }))
+    on('turn.complete', (_$, e) => ({ text: e.answer }) as never)
+    on('agent.report', (_$, e) => ({ text: e.text }) as never)
+    launchesInBackground(on, () => 'running')
+
+    await $.turn.start({ text: 'audit the skills', turnId: 't1' })
+    await $.tool.call(BACKGROUND_AGENT)
+    await $.turn.complete({ answer: 'Started an agent.', durationMs: 5_000, isAborted: false, turnId: 't1', reason: 'answer' } as never)
+    return { sent }
+  }
+
+  const NOTIFY = { options: { telegramBotToken: 'T', telegramChatId: '1', notifyLanguage: 'en' } }
+  const REPORT = { agentId: 'ag1', subagentType: 'general-purpose', provider: { plugin: 'engine', tier: 'core' }, text: 'done' }
+
+  test('once the background agents a turn left running have all ended, Telegram hears once', NOTIFY, async ($, on) => {
+    const clock = mock.clock(on)
+    const { sent } = await agentOutlivesTurn($, on)
+    const agentNotices = () => sent.filter(text => text.includes('background agents are done'))
+
+    await $.agent.report({ ...REPORT, status: 'completed' } as never)
+    await clock.advance(9_000)
+    expect(agentNotices()).toHaveLength(0)
+    await clock.advance(1_000)
+    for (let i = 0; i < 20 && agentNotices().length === 0; i++) await clock.advance(10)
+    expect(agentNotices()).toHaveLength(1)
+    expect(agentNotices()[0]).toContain('✓ general-purpose · probe')
+
+    await $.agent.report({ ...REPORT, status: 'completed' } as never)
+    await clock.advance(30_000)
+    expect(agentNotices()).toHaveLength(1)
+  })
+
+  test('a turn started before the background agents end sends no agents notice', NOTIFY, async ($, on) => {
+    const clock = mock.clock(on)
+    const { sent } = await agentOutlivesTurn($, on)
+
+    await $.turn.start({ text: 'next', turnId: 't2' })
+    await $.agent.report({ ...REPORT, status: 'failed' } as never)
+    await clock.advance(30_000)
+    expect(sent.some(text => text.includes('background agents are done'))).toBe(false)
   })
 
   test('while a turn runs, the roster is read every 15 seconds', async ($, on) => {
@@ -141,13 +220,13 @@ describe('agents', () => {
     await $.turn.start({ text: 'hi', turnId: 't1' })
     await $.tool.call(BACKGROUND_AGENT)
     await clock.advance(15_000)
-    expect(await bandShowsDone($, 'terminal')).toBe(false)
+    expect(await paneShowsDone($, 'terminal')).toBe(false)
 
     status = 'completed'
     await clock.advance(14_000)
-    expect(await bandShowsDone($, 'terminal')).toBe(false)
+    expect(await paneShowsDone($, 'terminal')).toBe(false)
     await clock.advance(1_000)
-    expect(await bandShowsDone($, 'terminal')).toBe(true)
+    expect(await paneShowsDone($, 'terminal')).toBe(true)
   })
 
   // classic.SubagentStart is passed over under a managed seat; the test raises none.
@@ -184,7 +263,7 @@ describe('agents', () => {
       // The request streams nothing.
     }
 
-    const ui = await $.ui.mount({ plugin: PLUGIN, surface: 'terminal', component: 'AbovePrompt', props: BAND_PROPS })
+    const ui = await mountPane($)
     expect(await ui.find({ type: 'Text', text: ' · Haiku 5.5' })).toBeDefined()
     await ui.unmount()
     release()
@@ -199,8 +278,8 @@ describe('agents', () => {
       return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn', usage: null } as never
     })
     on('turn.complete', (_$, e) => ({ text: e.answer }) as never)
-    const bandShows = async (worked: string) => {
-      const ui = await $.ui.mount({ plugin: PLUGIN, surface: 'terminal', component: 'AbovePrompt', props: BAND_PROPS })
+    const paneShows = async (worked: string) => {
+      const ui = await mountPane($)
       const found = await ui.find({ type: 'Text', text: ` · ${worked} · 0 tools` })
       await ui.unmount()
       return found !== undefined
@@ -210,45 +289,13 @@ describe('agents', () => {
     await clock.advance(10_000)
     await $.turn.complete({ answer: 'ok', durationMs: 10_000, isAborted: false, turnId: 'r1', reason: 'answer', agentId: 'ag1' } as never)
     await clock.advance(60_000)
-    expect(await bandShows('0:10')).toBe(true)
+    expect(await paneShows('0:10')).toBe(true)
 
     for await (const _chunk of $.turn.step({ turnId: 'r2', index: 0, model: 'claude-haiku-5-5', messageCount: 3, agentId: 'ag1' })) {
       // The request streams nothing.
     }
     await clock.advance(5_000)
-    expect(await bandShows('0:15')).toBe(true)
-  })
-})
-
-describe('status line', () => {
-  test('pins model, context, cost and 5h/7d usage under the prompt when usage moves', async ($, on) => {
-    const shown: (string | undefined)[] = []
-    on('ui.status', (_$, e) => {
-      shown.push(e.text)
-      return { value: undefined } as never
-    })
-    on('session.measure', (_$, e) => ({ changed: e.changed }))
-    await $.session.measure({
-      context: { tokens: 90_000, window: 1_000_000, percent: 9 },
-      rateLimits: [
-        { kind: 'five_hour', percentUsed: 13 },
-        { kind: 'seven_day', percentUsed: 38 },
-      ],
-      cost: { usd: 0.43 },
-      changed: ['context', 'rateLimits', 'cost'],
-    } as never)
-    expect(shown[shown.length - 1]).toBe('Claude │ ctx 9% │ $0.43 │ 5h 13% │ 7d 38%')
-  })
-
-  test('stays empty when switched off', { options: { statusLine: false } }, async ($, on) => {
-    const shown: (string | undefined)[] = []
-    on('ui.status', (_$, e) => {
-      shown.push(e.text)
-      return { value: undefined } as never
-    })
-    on('session.measure', (_$, e) => ({ changed: e.changed }))
-    await $.session.measure({ context: { window: 1_000_000, percent: 9 }, rateLimits: [], changed: ['context'] } as never)
-    expect(shown.filter(Boolean)).toEqual([])
+    expect(await paneShows('0:15')).toBe(true)
   })
 })
 
@@ -392,11 +439,12 @@ describe('agents without classic hooks', () => {
     await $.agent.spawn({ ...SPAWN, tool_use_id: 'tuA', description: 'explore auth', subagentType: 'Explore', background: false } as never)
     await $.turn.complete({ answer: '', durationMs: 5_000, isAborted: false, turnId: 'w', reason: 'answer', agentId: 'wf1' } as never)
 
-    const band = await bandText($)
-    expect(band).toContain('✓ general-purpose')
-    expect(band).toContain('review step')
-    expect(band).toMatch(/[◐◓◑◒] Explore/)
-    expect(band).toContain('explore auth')
+    const pane = await paneText($)
+    expect(pane).toContain('✓ general-purpose')
+    expect(pane).toContain('review step')
+    expect(pane).toMatch(/[◐◓◑◒] Explore/)
+    expect(pane).toContain('explore auth')
+    expect(await bandText($)).not.toContain('Explore')
     call.release()
     await running
   })
@@ -410,7 +458,7 @@ describe('agents without classic hooks', () => {
     await $.agent.spawn({ ...SPAWN, tool_use_id: '', description: 'scan', subagentType: 'Plan', background: true } as never)
     const reported = await $.agent.report({ agentId: 'bg1', subagentType: 'Plan', provider: SPAWN.provider, status: 'stopped', text: 'partial' } as never)
     expect(reported.text).toBe('partial')
-    expect(await bandText($)).toContain('⏹ Plan')
+    expect(await paneText($)).toContain('⏹ Plan')
   })
 
   test('a running agent’s call row gets a line of its live state; other rows are left alone', async ($, on) => {

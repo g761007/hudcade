@@ -14,7 +14,7 @@ and little 8-bit scenes that play while Claude thinks.
 
 English · [繁體中文](README.zh-TW.md)
 
-<img src="assets/hud.svg" alt="hudcade inside a Claude Code session: a pixel-scene spinner, the HUD band and the status line" width="100%">
+<img src="assets/hud.svg" alt="hudcade inside a Claude Code session: a pixel-scene spinner and the HUD band" width="100%">
 
 </div>
 
@@ -22,12 +22,12 @@ English · [繁體中文](README.zh-TW.md)
 
 Claude Code shows you the conversation. hudcade shows you everything happening around it.
 
-- **💸 Know what a turn costs while it runs.** Session cost, what this turn has added so far, and how close you are to the 5-hour and 7-day limits, with reset countdowns.
+- **💸 Know what a turn costs while it runs.** Session cost, what this turn has added so far, and how close you are to the 5-hour and 7-day limits, with reset countdowns and a warning when your pace would hit one before it resets.
 - **🧠 See context filling up before auto-compact hits.** A colored context bar with tokens left, how often the session has compacted, and, once you pass the warning line, what is eating the window.
 - **⚡ Catch a broken prompt cache.** Hit ratio for the session. The last request is flagged when it missed, and a resumed session whose cache has expired says so, with the cost of rebuilding it.
-- **🤖 Watch every worker at once.** Subagents with their model and current tool, agent-team teammates, background shells and scheduled loops, each on its own row.
+- **🤖 Keep track of your agents.** A live line under each running Agent call, a pane with every agent and its task, and rows for agent-team teammates, background shells and scheduled loops.
 - **🕹️ Make waiting fun.** The spinner becomes one of ten little 8-bit scenes that react to what Claude is doing.
-- **📱 Walk away.** A Telegram message when a turn finishes, when Claude needs your approval, or when a turn fails.
+- **📱 Walk away.** A Telegram message when a turn finishes, when Claude needs your approval, when a turn fails, or when the background agents it left running are all done.
 
 ## Install
 
@@ -43,7 +43,7 @@ In a Claude Code terminal session:
 
 The HUD shows up right away, in every session from then on, including those the desktop app starts on the same machine.
 
-If you used a `statusLine` command before, you can remove it from `~/.claude/settings.json`. hudcade draws its own status line.
+If you used a `statusLine` command before, you can remove it from `~/.claude/settings.json`. The HUD band shows the same and more.
 
 <details>
 <summary>Prefer the CLI?</summary>
@@ -64,17 +64,19 @@ Above the prompt, in the terminal and in the desktop app. Each row has a left an
 | Row | What it tells you |
 |---|---|
 | **Identity** | Model and effort · project and branch (dirty, ahead/behind) · lines added and removed and files edited this session · session cost, what this turn added, session time |
-| **Capacity** | Context bar, tokens left and compactions · prompt-cache hit ratio, and while idle how long the cache still holds the conversation (`⏳4m`, then `cache cold`) · 5-hour and 7-day limits with reset countdowns |
+| **Capacity** | Context bar, tokens left and compactions · prompt-cache hit ratio, and while idle how long the cache still holds the conversation (`⏳4m`, then `cache cold`) · 5-hour and 7-day limits with reset countdowns, and a forecast once your pace heads past 75% (`→92%`, or `→full in 50m`) |
 | **Activity** | Working, waiting for your approval, or idle (interrupted or failed, when the last turn ended so) · turn number, start time (and end time once done) · the tool running now · tokens in and out this turn · output speed · tool calls and failures · task progress |
 | **Step recap** | One line on what the turn is doing, written by a small model as its steps go by. Off unless you turn on `recap`. |
 | **Context breakdown** | The largest parts of the window. Only appears once context passes the warning threshold. |
-| **Workers** | Subagents (with their context share and how their tokens grew), teammates, background tasks and loops, while there are any |
+| **Workers** | Teammates, background tasks and loops, while there are any. Subagents are in Claude Code's own list under the prompt. |
+
+While hudcade's spinner runs in the terminal, the band leaves it the turn's clock, output tokens, speed, tool calls and cost, so nothing shows twice.
 
 Toasts warn you when context crosses its thresholds, and before a model switch that would throw away a warm prompt cache. The toast includes what rebuilding it will cost.
 
 ### Subagents
 
-Each subagent gets a row on the band: its type, model, the time it spent working, its tool calls and the tool in hand, its context share and a sparkline of its tokens. A row turns ✓ when the run completes, ✗ when it fails and ⏹ when it is stopped, and goes a minute later. Under the Agent call itself, in the transcript, a dim line shows the same while the agent runs. `/hud agents` opens a pane with every agent of the session and its task.
+Claude Code lists running subagents under the prompt. hudcade adds what that list leaves out. Under each Agent call in the transcript, while the agent runs, a dim line shows its model, the time it spent working, its tool calls and the tool in hand, its context share and a sparkline of its tokens. `/hud agents` opens a pane with every agent of the session and its task. A row there turns ✓ when the run completes, ✗ when it fails and ⏹ when it is stopped, and goes a minute later.
 
 Agents a workflow starts, forks and resumed agents get rows of their own.
 
@@ -87,14 +89,6 @@ With `recap` on, after Claude's tool steps a small model (`haiku` by default) re
 ```
 
 It makes at most one call every 10 seconds and only while a turn runs. Each call is billed to your session like any other request, and counts in its cost. It writes in the language your notifications use.
-
-### The status line
-
-A compact line under the prompt, for when you only want the essentials:
-
-```
-Opus 5.5 · xhigh │ ctx 41% │ $3.21 │ 5h 13% │ 7d 38%
-```
 
 ### The pixel spinner
 
@@ -136,6 +130,7 @@ Messages are sent in three cases:
 - **A turn completes.** Turns you interrupt and subagent turns are skipped.
 - **A permission prompt is waiting.**
 - **A turn fails**, for example on a rate limit.
+- **The background agents a turn left running have all ended**, while you are idle. The message lists each one and how it ended. It is skipped if you start another turn first.
 
 Messages come in English or Traditional Chinese. By default they follow Claude Code's own `language` setting. The bot token stays in Claude Code's secure storage and never appears in a log.
 
@@ -146,7 +141,6 @@ Everything lives in `/config`, or run `claude plugin configure hudcade`:
 | Option | Default | Meaning |
 |---|---|---|
 | `hud` | `true` | The HUD band |
-| `statusLine` | `true` | The line under the prompt |
 | `spinner` | `true` | The pixel spinner (terminal) |
 | `spinnerScene` | `random` | `random`, or one of `robot`, `coffee`, `garden`, `rocket`, `cat`, `fishing`, `train`, `campfire`, `weather`, `equalizer` |
 | `ctxWarnPercent` / `ctxCriticalPercent` | `60` / `80` | Context thresholds for colors, toasts and the breakdown row |
@@ -176,7 +170,7 @@ hudcade is a **mod**: a plugin of function hooks that runs inside Claude Code it
 
 - **No statusline script.** Nothing is spawned on every refresh, and no transcript files are parsed.
 - **It reads the engine directly.** Usage, cost and rate limits come from `$.session.usage()`. Tool calls, subagents and tasks come from `tool.call` and the session events. Tokens, cache reads and output speed come from the model's own response stream.
-- **The drawing goes through Claude Code's UI.** The band and the status line are drawn with the UI's elements. The scenes are a `Raster` repainted about twelve times a second while a turn runs, and only then.
+- **The drawing goes through Claude Code's UI.** The band is drawn with the UI's elements. The scenes are a `Raster` repainted about twelve times a second while a turn runs, and only then.
 - **The logic is plain TypeScript, separate from the hooks.** The HUD model, the layout, the scenes and the messages are pure functions, covered by tests that also mount the band on the terminal and desktop surfaces.
 
 ## Requirements
@@ -188,6 +182,7 @@ hudcade is a **mod**: a plugin of function hooks that runs inside Claude Code it
 ## Known limits
 
 - **Background tasks and loops** refresh when a turn ends. One that finishes while you are idle stays listed until the next turn.
+- **The rate-limit forecast** uses the pace since the window opened, so a burst after a quiet stretch shows up slowly. It appears once a tenth of the window has gone by.
 - **Lines added and removed** count Edit and Write changes, not files changed through shell commands.
 - **Output speed** counts from the first streamed chunk, thinking included.
 - **Before the first reply** of a session, Claude Code has no context or rate-limit readings yet. The band says so instead of showing zeros.

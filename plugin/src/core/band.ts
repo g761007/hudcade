@@ -2,13 +2,14 @@
 // Pure: the mod maps each row to a left and a right group of <Text>.
 //
 //   identity   ◆ model · effort   project ⎇ branch   +added −removed · files      cost +turn · ◷ time
-//   capacity   ctx bar % · left · ⟲compactions                cache % │ 5h bar % reset │ 7d bar % reset
+//   capacity   ctx bar % · left · ⟲compactions        cache % │ 5h bar % reset →forecast │ 7d bar % reset →forecast
 //   activity   ● status clock · turn n   since start / start–end   ◑ tool    ↑in ↓out · tok/s │ tasks d/n ▸ active
 //   (recap)    ↳ a small model's line on what the turn is doing, when recap is on
 //   (context)  ↳ the largest parts of the window, once context passes the warning threshold
-//   workers    agent / mate / bg / loop rows, while there are any
+//   workers    mate / bg / loop rows, while there are any (Claude Code lists
+//              subagents under the prompt itself)
 
-import type { AgentRun, Hud } from '../../types'
+import type { AgentRun, Hud, RateWindow } from '../../types'
 import {
   bar,
   clock,
@@ -23,12 +24,14 @@ import {
   truncate,
   usd,
 } from './format'
-import { agentWorkedMs, cacheHitPercent, cacheRemainingMs, isAgentShown, withDefaults } from './hud-model'
+import { agentWorkedMs, cacheHitPercent, cacheRemainingMs, rateForecast, withDefaults } from './hud-model'
 
 export type Seg = { text: string; color?: string; dim?: boolean; bold?: boolean }
 export type Row = { left: Seg[]; right: Seg[] }
 
-export type BandOptions = { warnPercent: number; criticalPercent: number }
+// `hasSpinner`: this surface draws hudcade's spinner while a turn works, and
+// the spinner already shows the turn's clock, tool calls, output, speed and cost.
+export type BandOptions = { warnPercent: number; criticalPercent: number; hasSpinner?: boolean }
 
 // Lower numbers are dropped last when a row is too wide.
 type Group = { priority: number; side: 'left' | 'right'; segs: Seg[] }
@@ -38,10 +41,14 @@ const RIGHT_SEP: Seg = { text: ' │ ', dim: true }
 const MIN_GAP = 2
 const SPIN = ['◐', '◓', '◑', '◒']
 const MAX_WORKER_ROWS = 4
+const FORECAST_SHOWN_PERCENT = 75
 
 export function buildBand(raw: Hud, now: number, columns: number, options: BandOptions): Row[] {
   const h = withDefaults(raw)
-  const rows = [identityRow(h, now), capacityRow(h, now, options), activityRow(h, now)].map(groups => fit(groups, columns))
+  const isSpinning = options.hasSpinner === true && h.turn.status === 'working'
+  const rows = [identityRow(h, now, isSpinning), capacityRow(h, now, options), activityRow(h, now, isSpinning)].map(groups =>
+    fit(groups, columns),
+  )
   if (h.recap && h.recap.turn === h.turn.count) {
     const isLive = h.turn.status !== 'idle'
     rows.push(fit([{ priority: 0, side: 'left', segs: [{ text: '  ↳ ', dim: true }, { text: h.recap.text, color: isLive ? 'suggestion' : undefined, dim: !isLive }] }], columns))
@@ -50,7 +57,7 @@ export function buildBand(raw: Hud, now: number, columns: number, options: BandO
   if (percent !== undefined && percent >= options.warnPercent && h.ctxTop?.length) {
     rows.push(fit([contextGroup(h)], columns))
   }
-  for (const row of workerRows(h, now)) rows.push(fit([{ priority: 0, side: 'left', segs: row }], columns))
+  for (const row of workerRows(h)) rows.push(fit([{ priority: 0, side: 'left', segs: row }], columns))
   return rows.filter(row => row.left.length + row.right.length > 0)
 }
 
@@ -60,7 +67,7 @@ export function rowText(row: Row): string {
 
 // ── Rows ────────────────────────────────────────────────────────────────────
 
-function identityRow(h: Hud, now: number): Group[] {
+function identityRow(h: Hud, now: number, isSpinning: boolean): Group[] {
   const groups: Group[] = []
   const model = modelLabel(h.model) ?? 'Claude'
   groups.push({
@@ -93,7 +100,9 @@ function identityRow(h: Hud, now: number): Group[] {
   const money: Seg[] = []
   if (h.costUsd !== undefined) {
     money.push({ text: usd(h.costUsd), bold: true })
-    const delta = h.turn.status !== 'idle' && h.turn.costAtStart !== undefined ? h.costUsd - h.turn.costAtStart : 0
+    // What this turn added, unless the spinner shows it or it is all the session has spent.
+    const before = h.turn.costAtStart ?? 0
+    const delta = h.turn.status !== 'idle' && !isSpinning && before >= 0.005 ? h.costUsd - before : 0
     if (delta >= 0.005) money.push({ text: ` +${usd(delta).slice(1)}`, dim: true })
   }
   if (h.sessionStartedAt !== undefined) {
@@ -145,10 +154,20 @@ function capacityRow(h: Hud, now: number, options: BandOptions): Group[] {
         { text: bar(rate.percent, 4), color },
         { text: ` ${Math.round(rate.percent)}%`, color: rate.percent >= 75 ? color : undefined },
         ...(wait !== undefined ? [{ text: ` ${compactDuration(wait)}`, dim: true }] : []),
+        ...forecastSegs(rate, now),
       ],
     })
   })
   return groups
+}
+
+// →92%: the window's use at its reset, at its pace so far; →full in 50m when
+// it fills before then. Shown only from FORECAST_SHOWN_PERCENT up.
+function forecastSegs(rate: RateWindow, now: number): Seg[] {
+  const forecast = rateForecast(rate, now)
+  if (!forecast || forecast.atResetPercent < FORECAST_SHOWN_PERCENT) return []
+  if (forecast.fullInMs !== undefined) return [{ text: ` →full in ${compactDuration(forecast.fullInMs)}`, color: 'error' }]
+  return [{ text: ` →${Math.round(forecast.atResetPercent)}%`, color: 'warning' }]
 }
 
 // While idle, how long the prompt cache still holds the conversation: past
@@ -177,7 +196,7 @@ function cacheGroup(h: Hud, now: number): Group | undefined {
   }
 }
 
-function activityRow(h: Hud, now: number): Group[] {
+function activityRow(h: Hud, now: number, isSpinning: boolean): Group[] {
   const groups: Group[] = []
   const { turn } = h
   const at = (ms: number) => wallClock(ms, h.tzOffsetMinutes)
@@ -194,7 +213,7 @@ function activityRow(h: Hud, now: number): Group[] {
       groups.push({ priority: 2, side: 'left', segs: [{ text: `${at(turn.startedAt)}–${at(turn.endedAt)}${took}`, dim: true }] })
     }
   } else {
-    const elapsed = turn.startedAt !== undefined ? ` ${clock(now - turn.startedAt)}` : ''
+    const elapsed = turn.startedAt !== undefined && !isSpinning ? ` ${clock(now - turn.startedAt)}` : ''
     const status: Seg =
       turn.status === 'waiting'
         ? { text: `⚠ waiting for you${elapsed}`, color: 'warning', bold: true }
@@ -219,13 +238,16 @@ function activityRow(h: Hud, now: number): Group[] {
     })
   }
 
+  // While the spinner runs it shows the output, speed and tool calls: only
+  // the input and the failures stay here.
   const io: Seg[] = []
-  if (h.turnTokens && h.turnTokens.input + h.turnTokens.output > 0) {
-    io.push({ text: `↑${tokens(h.turnTokens.input)} ↓${tokens(h.turnTokens.output)}`, dim: true })
+  const flow = h.turnTokens ?? { input: 0, output: 0 }
+  if (isSpinning ? flow.input > 0 : flow.input + flow.output > 0) {
+    io.push({ text: isSpinning ? `↑${tokens(flow.input)}` : `↑${tokens(flow.input)} ↓${tokens(flow.output)}`, dim: true })
   }
-  if (h.tokensPerSecond !== undefined) io.push({ text: `${io.length ? ' · ' : ''}${Math.round(h.tokensPerSecond)} tok/s`, dim: true })
-  if (h.tools.total > 0) {
-    io.push({ text: `${io.length ? ' · ' : ''}tools ${h.tools.total}`, dim: true })
+  if (h.tokensPerSecond !== undefined && !isSpinning) io.push({ text: `${io.length ? ' · ' : ''}${Math.round(h.tokensPerSecond)} tok/s`, dim: true })
+  if (h.tools.total > 0 && (!isSpinning || h.tools.failed > 0)) {
+    io.push({ text: `${io.length ? ' · ' : ''}tools${isSpinning ? '' : ` ${h.tools.total}`}`, dim: true })
     if (h.tools.failed > 0) io.push({ text: ` ✗${h.tools.failed}`, color: 'error' })
   }
   if (io.length) groups.push({ priority: 3, side: 'right', segs: io })
@@ -253,9 +275,8 @@ function contextGroup(h: Hud): Group {
 
 // ── Workers ─────────────────────────────────────────────────────────────────
 
-function workerRows(h: Hud, now: number, maxRows = MAX_WORKER_ROWS): Seg[][] {
+function workerRows(h: Hud, maxRows = MAX_WORKER_ROWS): Seg[][] {
   const rows: Seg[][] = []
-  for (const agent of sortAgents(h.agents.filter(a => isAgentShown(a, now)))) rows.push([tag('agent'), ...agentRow(agent, now)])
   for (const mate of h.teammates) {
     const isBusy = mate.status === 'running' || mate.status === 'pending'
     rows.push([
@@ -336,7 +357,7 @@ export function paneRows(raw: Hud, now: number): Seg[][] {
     rows.push(agentRow(agent, now, { hasDescription: false }))
     if (agent.description) rows.push([{ text: `   ${agent.description}`, dim: agent.status !== 'running' }])
   }
-  for (const row of workerRows({ ...h, agents: [] }, now, Number.POSITIVE_INFINITY)) rows.push(row)
+  for (const row of workerRows(h, Number.POSITIVE_INFINITY)) rows.push(row)
   if (rows.length === 0) rows.push([{ text: 'No agents in this session yet.', dim: true }])
   return rows
 }
@@ -440,19 +461,4 @@ function isWide(cp: number): boolean {
     (cp >= 0x1f300 && cp <= 0x1faff) ||
     (cp >= 0x20000 && cp <= 0x3fffd)
   )
-}
-
-// The compact line pinned under the prompt: model · effort │ ctx │ cost │ 5h │ 7d.
-export function statusLine(raw: Hud): string {
-  const h = withDefaults(raw)
-  const model = modelLabel(h.model) ?? 'Claude'
-  const parts = [h.effort ? `${model} · ${h.effort}` : model]
-  const percent = ctxPercent(h)
-  parts.push(percent !== undefined ? `ctx ${Math.round(percent)}%` : 'ctx —')
-  if (h.costUsd !== undefined) parts.push(usd(h.costUsd))
-  for (const [kind, label] of [['five_hour', '5h'], ['seven_day', '7d']] as const) {
-    const rate = h.rates.find(r => r.kind === kind)
-    if (rate) parts.push(`${label} ${Math.round(rate.percent)}%`)
-  }
-  return parts.join(' │ ')
 }

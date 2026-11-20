@@ -14,12 +14,6 @@
       "description": "Show model, effort, cost, context, rate limits, git and session/agent progress above the prompt.",
       "default": true
     },
-    "statusLine": {
-      "type": "boolean",
-      "title": "Status line",
-      "description": "Show a compact line under the prompt: model, effort, context, cost and 5-hour/7-day usage.",
-      "default": true
-    },
     "spinner": {
       "type": "boolean",
       "title": "Pixel spinner",

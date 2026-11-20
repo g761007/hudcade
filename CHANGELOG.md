@@ -5,6 +5,32 @@ All notable changes to hudcade are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Removed
+
+- The status line under the prompt, and its `statusLine` option. It repeated
+  the band's first two rows, and Claude Code draws a mod's status as a
+  `⚠ hudcade:` notice, which read like a warning.
+- Subagent rows on the HUD band. Claude Code lists running subagents under
+  the prompt itself. The dim line under each running Agent call and the
+  `/hud agents` pane stay.
+
+### Changed
+
+- While hudcade's spinner runs in the terminal, the band leaves it the turn's
+  clock, output tokens, speed, tool calls and cost instead of showing them
+  twice. The desktop app, and a terminal with the spinner off, keep them.
+- The band no longer shows what the turn added to the cost when that is all
+  the session has spent (`$3.79 +3.79`).
+
+### Added
+
+- A forecast on the 5-hour and 7-day limits, at the pace since the window
+  opened, once it heads past 75%: `→92%` at the reset, or `→full in 50m`.
+- A Telegram message when the background agents a turn left running have all
+  ended while you are idle, listing each with how it ended.
+
 ## [0.2.0] - 2026-11-20
 
 ### Fixed

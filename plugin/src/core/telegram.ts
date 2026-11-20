@@ -2,9 +2,9 @@
 // Chinese: project, branch, time, duration, model, effort, cost, limits,
 // context, a summary of the reply and the session id.
 
-import { compactDuration, modelLabel, msUntil, preciseDuration, usd } from './format'
+import { compactDuration, modelLabel, msUntil, preciseDuration, truncate, usd } from './format'
 
-export type NotifyKind = 'done' | 'permission' | 'failure' | 'test'
+export type NotifyKind = 'done' | 'permission' | 'failure' | 'agents' | 'test'
 
 export type NotifyLanguage = 'en' | 'zh-TW'
 
@@ -47,6 +47,7 @@ const STRINGS: Record<NotifyLanguage, Strings> = {
       done: '✅ Claude Code is done',
       permission: '⚠️ Claude Code needs your approval',
       failure: '❌ Claude Code turn failed',
+      agents: '🤖 Claude Code’s background agents are done',
       test: '🧪 hudcade test notification',
     },
     project: 'Project: ',
@@ -63,6 +64,7 @@ const STRINGS: Record<NotifyLanguage, Strings> = {
       done: '✅ Claude Code 完成回覆',
       permission: '⚠️ Claude Code 需要你的確認',
       failure: '❌ Claude Code 回覆失敗',
+      agents: '🤖 Claude Code 的背景 agent 都結束了',
       test: '🧪 hudcade 測試通知',
     },
     project: '專案：',
@@ -101,7 +103,8 @@ export function buildMessage(f: NotifyFacts): string {
   const stats = statsLine(f)
   if (stats) lines.push(esc(stats))
 
-  if (f.detail) lines.push(`${f.kind === 'failure' ? s.error : s.details}${esc(f.detail)}`)
+  // The agents' list stands on its own lines.
+  if (f.detail) lines.push(f.kind === 'agents' ? esc(f.detail) : `${f.kind === 'failure' ? s.error : s.details}${esc(f.detail)}`)
   if (f.summary) lines.push(`${s.summary}${esc(f.summary)}`)
   if (f.sessionId) lines.push(`${s.session}<code>${esc(f.sessionId.slice(0, 8))}</code>`)
   return lines.join('\n')
@@ -120,6 +123,14 @@ function statsLine(f: NotifyFacts): string {
     parts.push(`ctx:${Math.round(f.ctxPercent)}%${family ? `(${family})` : ''}`)
   }
   return parts.join(' ')
+}
+
+// The background agents a notice reports, one a line: ✓ done, ✗ failed, ⏹ stopped.
+export function agentList(agents: readonly { label: string; status?: string }[], max = 8): string {
+  const glyph = (status?: string) => (status === 'failed' ? '✗' : status === 'stopped' ? '⏹' : '✓')
+  const lines = agents.slice(0, max).map(a => `${glyph(a.status)} ${truncate(a.label.replace(/\s+/g, ' '), 80)}`)
+  if (agents.length > max) lines.push(`…+${agents.length - max}`)
+  return lines.join('\n')
 }
 
 // The reply's gist: no code blocks or markdown marks, one line, ~max chars.

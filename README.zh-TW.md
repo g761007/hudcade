@@ -14,7 +14,7 @@ Claude 思考的時候，還有 8-bit 小動畫陪你等。
 
 [English](README.md) · 繁體中文
 
-<img src="assets/hud.svg" alt="hudcade 在 Claude Code 中的畫面：像素等待動畫、HUD 資訊列與狀態列" width="100%">
+<img src="assets/hud.svg" alt="hudcade 在 Claude Code 中的畫面：像素等待動畫與 HUD 資訊列" width="100%">
 
 </div>
 
@@ -22,12 +22,12 @@ Claude 思考的時候，還有 8-bit 小動畫陪你等。
 
 Claude Code 顯示的是對話內容；hudcade 讓你看到對話以外的所有狀況。
 
-- **💸 回合還在跑，就知道花了多少錢**：session 累計成本、這回合目前增加的金額，以及距離 5 小時、7 天用量上限還有多遠，附重置倒數。
+- **💸 回合還在跑，就知道花了多少錢**：session 累計成本、這回合目前增加的金額，以及距離 5 小時、7 天用量上限還有多遠，附重置倒數；照目前速度會在重置前用完時，也會提醒你。
 - **🧠 自動壓縮前就看到 context 快滿了**：彩色進度條顯示剩餘 token 和壓縮次數。超過警告線後，還會列出是哪些內容在佔用 context。
 - **⚡ 快取失效馬上發現**：顯示整個 session 的 prompt 快取命中率，最近一次沒命中時會特別標出來。resume 時如果快取已經過期，也會直接告訴你，並附上重建快取的費用。
-- **🤖 所有工作者一次掌握**：subagent（含 model 和正在用的工具）、Agent Teams 隊友、背景指令、排程，各自一行。
+- **🤖 掌握你的 agent**：每個執行中的 Agent 呼叫下方有一行即時狀態，另有側邊 pane 列出所有 agent 和各自的任務；Agent Teams 隊友、背景指令、排程也各自一行。
 - **🕹️ 等待也變有趣**：等待動畫換成 10 組 8-bit 小場景之一，畫面會跟著 Claude 正在做的事變化。
-- **📱 放心離開座位**：回合完成、需要你確認權限、或回合失敗時，都會發 Telegram 通知給你。
+- **📱 放心離開座位**：回合完成、需要你確認權限、回合失敗，或回合留下的背景 agent 都結束時，都會發 Telegram 通知給你。
 
 ## 安裝
 
@@ -43,7 +43,7 @@ Claude Code 顯示的是對話內容；hudcade 讓你看到對話以外的所有
 
 裝好就立刻生效，之後每個 session 都會出現，包括桌面版 app 在同一台電腦上啟動的 session。
 
-如果你以前設定過 `statusLine` 指令，可以把它從 `~/.claude/settings.json` 移除，hudcade 會畫自己的狀態列。
+如果你以前設定過 `statusLine` 指令，可以把它從 `~/.claude/settings.json` 移除，HUD 資訊列已經涵蓋它的內容。
 
 <details>
 <summary>想用 CLI 安裝？</summary>
@@ -64,23 +64,25 @@ claude plugin install hudcade@hudcade
 | 行 | 顯示內容 |
 |---|---|
 | **身分** | model 與 effort · 專案與 branch（是否有未提交的修改、領先或落後幾個 commit）· 這個 session 增刪的行數與修改過的檔案數 · session 成本、這回合增加的金額、session 時長 |
-| **容量** | context 進度條、剩餘 token、壓縮次數 · prompt 快取命中率，閒置時另外顯示快取還能保留多久（`⏳4m`，過期後顯示 `cache cold`）· 5 小時與 7 天用量上限及重置倒數 |
+| **容量** | context 進度條、剩餘 token、壓縮次數 · prompt 快取命中率，閒置時另外顯示快取還能保留多久（`⏳4m`，過期後顯示 `cache cold`）· 5 小時與 7 天用量上限及重置倒數；照目前速度會超過 75% 時顯示預測（`→92%`，或 `→full in 50m`） |
 | **活動** | 工作中、等待你確認權限或閒置（上一回合被中斷或失敗時會標示出來）· 回合數、開始時間（結束後顯示開始與結束時間）· 正在執行的工具 · 本回合送出與收到的 token · 輸出速度 · 工具呼叫次數與失敗數 · task 進度 |
 | **逐步摘要** | 由小模型隨著工具步驟寫出的一行摘要，說明這回合正在做什麼。要開啟 `recap` 才會出現 |
 | **context 組成** | 佔用 context 最多的幾個部分。只在超過警告門檻時出現 |
-| **工作者** | subagent（含 context 用量和 token 變化趨勢）、隊友、背景任務、排程。有資料時才出現 |
+| **工作者** | 隊友、背景任務、排程。有資料時才出現。subagent 由 Claude Code 自己在輸入框下方列出 |
+
+終端機裡 hudcade 的等待動畫在跑時，回合經過時間、輸出 token、速度、工具次數和花費都交給等待動畫顯示，資訊列不會重複顯示。
 
 context 超過門檻時，會跳出提示提醒你。切換 model 會讓仍然有效的 prompt 快取失效時，也會先提醒你，並附上重建快取的費用。
 
 ### Subagent
 
-每個 subagent 在資訊列上都有一行，顯示：
+Claude Code 會在輸入框下方列出執行中的 subagent，hudcade 補上那份清單沒有的資訊。agent 執行期間，對話記錄裡那個 Agent 呼叫的下方會有一行淡色文字，顯示：
 - 類型與 model
 - 實際工作的時間
 - 工具呼叫次數與正在用的工具
 - context 用量，以及 token 變化的小趨勢圖
 
-執行完成顯示 ✓、失敗顯示 ✗、被停止顯示 ⏹，一分鐘後消失。agent 執行期間，對話記錄裡那個 Agent 呼叫的下方也會有一行淡色文字顯示同樣的資訊。`/hud agents` 會開一個側邊 pane，列出這個 session 所有 agent 和各自的任務。
+`/hud agents` 會開一個側邊 pane，列出這個 session 所有 agent 和各自的任務。執行完成顯示 ✓、失敗顯示 ✗、被停止顯示 ⏹，一分鐘後消失。
 
 workflow 啟動的 agent、fork 和被喚醒繼續工作的 agent 都會有自己的一行。
 
@@ -93,14 +95,6 @@ workflow 啟動的 agent、fork 和被喚醒繼續工作的 agent 都會有自�
 ```
 
 每 10 秒最多呼叫一次，而且只在回合進行中呼叫。每次呼叫都和其他請求一樣算在你的 session 費用裡。摘要的語言和通知訊息相同。
-
-### 狀態列
-
-輸入框下方的精簡版，只想看重點時剛好：
-
-```
-Opus 5.5 · xhigh │ ctx 41% │ $3.21 │ 5h 13% │ 7d 38%
-```
 
 ### 像素等待動畫
 
@@ -144,11 +138,12 @@ Claude 工作時，等待動畫會換成一組 8-bit 小場景，每回合都會
 Session：11fa1a35
 ```
 
-以下三種情況會發通知：
+以下四種情況會發通知：
 
 - **回合完成**：你中斷的回合和 subagent 的回合不會通知。
 - **需要你確認權限**。
 - **回合失敗**：例如觸發用量上限。
+- **回合留下的背景 agent 都結束了**：只在你閒置時發送，會列出每個 agent 和結束方式。如果你在它們結束前又開始新回合，就不會發。
 
 通知訊息支援英文和正體中文，預設會跟著 Claude Code 的 `language` 設定。bot token 存放在 Claude Code 的安全儲存區，不會出現在任何 log 中。
 
@@ -159,7 +154,6 @@ Session：11fa1a35
 | 選項 | 預設值 | 說明 |
 |---|---|---|
 | `hud` | `true` | HUD 資訊列 |
-| `statusLine` | `true` | 輸入框下方的狀態列 |
 | `spinner` | `true` | 像素等待動畫（終端機） |
 | `spinnerScene` | `random` | `random`，或 `robot`、`coffee`、`garden`、`rocket`、`cat`、`fishing`、`train`、`campfire`、`weather`、`equalizer` 其中一組 |
 | `ctxWarnPercent` / `ctxCriticalPercent` | `60` / `80` | context 的警告與危險門檻，影響顏色、跳出提示和 context 組成行 |
@@ -195,7 +189,7 @@ hudcade 是一個 **mod**，也就是由 function hooks 組成、直接在 Claud
   - 用量、成本、用量上限：來自 `$.session.usage()`
   - 工具呼叫、subagent、task：來自 `tool.call` 和 session 事件
   - token、快取讀取量、輸出速度：來自模型本身的回應串流
-- **透過 Claude Code 的 UI 繪製**：資訊列和狀態列都用 Claude Code 自己的 UI 元件繪製。場景是一個 `Raster`，只在回合進行中才會每秒更新約十二次。
+- **透過 Claude Code 的 UI 繪製**：資訊列用 Claude Code 自己的 UI 元件繪製。場景是一個 `Raster`，只在回合進行中才會每秒更新約十二次。
 - **邏輯與 hooks 分開，全部是純 TypeScript**：HUD 狀態、版面、場景和通知訊息都是純函式，並有測試涵蓋；測試也會實際在終端機和桌面版兩種畫面上 mount 資訊列。
 
 ## 系統需求
@@ -207,6 +201,7 @@ hudcade 是一個 **mod**，也就是由 function hooks 組成、直接在 Claud
 ## 已知限制
 
 - **背景任務與排程**：在回合結束時更新。如果任務在你閒置時結束，會一直顯示到下一回合結束。
+- **用量上限預測**：用的是這個時段開始以來的平均速度，所以安靜一陣子之後突然大量使用，預測會比較慢才反映出來。時段過了十分之一以後才會出現。
 - **增刪行數**：只計算 Edit 和 Write 的修改，不包含透過 shell 指令修改的檔案。
 - **輸出速度**：從收到第一段串流內容開始計算，包含 thinking。
 - **session 第一次回覆之前**：Claude Code 還沒有 context 和用量上限的數據，資訊列會直接說明這點，不會顯示 0。
