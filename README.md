@@ -119,6 +119,8 @@ The spinner is terminal only; the desktop app keeps its own.
 
 ### Turn replay
 
+<img src="assets/replay.svg" alt="The replay pane on a turn's last step: the test run's command and output, and the turn's eight steps with their outcomes and the lines each edit changed" width="624">
+
 When a turn that called tools ends, the idle band offers `▶ /hud replay (8 steps)`. `/hud replay` opens a pane on the turn's first tool call. You move through the steps yourself: `n` and `p`, or press a step in the list. Past the last step is a summary: how the turn ended, its steps, failures and agents, and the lines its edits changed.
 
 For each step the pane shows its tool and file, ✓, ✗ (failed or refused) or ⏹ (still running when the turn ended), how long it took and when in the turn it ran, and what you asked. Under it are the call's arguments in full, wrapped (a command, a path from the project's root, a pattern), and the start of what it answered, or why it was refused. On the summary, the files the turn's edits changed are listed with their lines. An Edit or Write shows the lines it adds and removes (`+12 −3`); `d` opens its diff, with line numbers and highlighting, and `n` and `p` then go from one change to the next. The step and its change are noted as the call starts, read from the file as it was, so a refused or failed edit still shows what it meant to change.
@@ -130,6 +132,8 @@ The pane takes as much room as Claude Code gives one: docked beside a fullscreen
 A turn that called no tool leaves the last replay as it was. The last replay of each project is also kept on disk, so it outlives a restart, a `/clear` or the conversation moving to a new session: `/hud replay` opens it there, marked as from an earlier session.
 
 ### One-click handoff
+
+<img src="assets/handoff.svg" alt="The idle HUD band at 82% context: the replay hint, the prompt cache counting down, and the handoff button" width="100%">
 
 Once context reaches `handoffPercent` (80% by default; `/hud handoff-at 70` sets it from the prompt), the idle band offers a `⇢ handoff` button (`h` once the band has the keys, or a click). Pressed, or run as `/hud handoff` at any time:
 

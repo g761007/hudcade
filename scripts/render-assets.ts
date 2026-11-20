@@ -1,7 +1,8 @@
 // Renders the README images from the mod's own code, so they show exactly
-// what it draws: assets/hud.svg (a terminal mock-up) and assets/demo.gif
-// (the spinner scenes). Needs Bun, ImageMagick (`magick`) and Menlo or
-// another monospace font.
+// what it draws: assets/hud.svg (a terminal mock-up of a running turn),
+// assets/replay.svg (the replay pane), assets/handoff.svg (the idle band
+// offering a handoff) and assets/demo.gif (the spinner scenes). Needs Bun,
+// ImageMagick (`magick`) and Menlo or another monospace font.
 //
 //   bun scripts/render-assets.ts
 
@@ -9,8 +10,11 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import type { Replay, ReplayStep } from '../plugin/types'
 import { buildBand, displayWidth, type Seg } from '../plugin/src/core/band'
+import { editHunks } from '../plugin/src/core/diff'
 import * as hud from '../plugin/src/core/hud-model'
+import { lineOf, replayView, stepChange } from '../plugin/src/core/replay'
 import { SCENE_NAMES, SCENES } from '../plugin/src/core/scenes'
 import { Canvas, CLEAR } from '../plugin/src/core/scenes/canvas'
 import type { Mode } from '../plugin/src/core/scenes/mode'
@@ -74,6 +78,18 @@ function tspans(segs: Seg[], x0: number, cw: number): string {
       return span
     })
     .join('')
+}
+
+// A terminal window around `body`: its chrome and the title Claude Code runs under.
+function windowSvg(width: number, height: number, body: string): string {
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" font-family="${FONT}" font-size="14">
+<rect width="${width}" height="${height}" rx="10" fill="${COLORS.bg}"/>
+<rect width="${width}" height="32" rx="10" fill="${COLORS.chrome}"/><rect y="22" width="${width}" height="10" fill="${COLORS.chrome}"/>
+<circle cx="20" cy="16" r="6" fill="#ff5f57"/><circle cx="40" cy="16" r="6" fill="#febc2e"/><circle cx="60" cy="16" r="6" fill="#28c840"/>
+<text x="${width / 2}" y="21" text-anchor="middle" fill="${COLORS.dim}" font-size="12">~/code/my-app — claude</text>
+${body}
+</svg>
+`
 }
 
 // ── The terminal mock-up ────────────────────────────────────────────────────
@@ -179,14 +195,150 @@ function renderHudSvg(): string {
 
   const width = Math.round(pad * 2 + COLS * cw)
   const height = Math.round(y + 6)
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" font-family="${FONT}" font-size="14">
-<rect width="${width}" height="${height}" rx="10" fill="${COLORS.bg}"/>
-<rect width="${width}" height="32" rx="10" fill="${COLORS.chrome}"/><rect y="22" width="${width}" height="10" fill="${COLORS.chrome}"/>
-<circle cx="20" cy="16" r="6" fill="#ff5f57"/><circle cx="40" cy="16" r="6" fill="#febc2e"/><circle cx="60" cy="16" r="6" fill="#28c840"/>
-<text x="${width / 2}" y="21" text-anchor="middle" fill="${COLORS.dim}" font-size="12">~/code/my-app — claude</text>
-${rows.join('\n')}
-</svg>
-`
+  return windowSvg(width, height, rows.join('\n'))
+}
+
+// ── The turn replay ─────────────────────────────────────────────────────────
+
+// The turn the mock-up's session just finished, as /hud replay holds it.
+function sampleReplay(t0: number): Replay {
+  const at = (s: number, took: number, over: Partial<ReplayStep>): ReplayStep => ({
+    callId: `c${s}`,
+    tool: 'Read',
+    detail: '',
+    startedAt: t0 + s * 1000,
+    endedAt: t0 + (s + took) * 1000,
+    isError: false,
+    ...over,
+  })
+  const client = 'export async function fetchJson(url: string) {\n  const res = await fetch(url)\n  return res.json()\n}\n'
+  const retried = client.replace('  const res = await fetch(url)\n', '  const res = await withRetry(() => fetch(url), { tries: 4, backoffMs: 200 })\n')
+  const tests = 'Run the test suite'
+  return {
+    turn: 7,
+    task: 'add retries with backoff to the HTTP client and test them',
+    scene: 'robot',
+    startedAt: t0,
+    endedAt: t0 + 135_000,
+    outcome: 'answer',
+    steps: [
+      at(3, 0, { tool: 'Read', detail: 'client.ts', fields: [{ label: 'file path', value: 'src/http/client.ts' }] }),
+      at(5, 1, { tool: 'Grep', detail: 'fetchJson', fields: [{ label: 'pattern', value: 'fetchJson' }, { label: 'path', value: 'src' }] }),
+      at(8, 41, { tool: 'Agent', detail: 'find every caller of fetchJson', agentId: 'ag' }),
+      at(52, 1, { tool: 'Edit', detail: 'client.ts', fields: [{ label: 'file path', value: 'src/http/client.ts' }], ...stepChange(editHunks(client, retried)) }),
+      at(58, 1, { tool: 'Write', detail: 'client.test.ts', fields: [{ label: 'file path', value: 'src/http/client.test.ts' }], added: 64, removed: 0 }),
+      at(66, 9, { tool: 'Bash', detail: tests, isError: true, output: ' FAIL  src/http/client.test.ts\n  ✕ gives up after 4 tries (7 ms)' }),
+      at(80, 1, { tool: 'Edit', detail: 'client.ts', fields: [{ label: 'file path', value: 'src/http/client.ts' }], added: 3, removed: 1 }),
+      at(86, 8, {
+        tool: 'Bash',
+        detail: tests,
+        fields: [
+          { label: 'description', value: tests },
+          { label: 'command', value: 'npm test -- src/http' },
+        ],
+        output: ' PASS  src/http/client.test.ts\n  ✓ retries a 503 with backoff (12 ms)\n  ✓ gives up after 4 tries (8 ms)\n  ✓ does not retry a 400 (2 ms)\n\nTests:  6 passed, 6 total',
+      }),
+    ],
+    agents: {
+      ag: {
+        type: 'Explore',
+        description: 'find every caller of fetchJson',
+        steps: [at(9, 1, { tool: 'Grep', detail: 'fetchJson' }), at(11, 0, { tool: 'Read', detail: 'users.ts' }), at(12, 0, { tool: 'Read', detail: 'orders.ts' })],
+      },
+    },
+  }
+}
+
+// The replay pane, docked beside the transcript, on the turn's last step.
+function renderReplaySvg(): string {
+  const COLS = 66
+  const BODY_ROWS = 21
+  const cw = 8.43
+  const lh = 19
+  const pad = 22
+  const t0 = Date.UTC(2026, 9, 8, 6, 30, 0)
+  const r = sampleReplay(t0)
+  const view = replayView(r, lineOf(r, undefined), 7, COLS, BODY_ROWS - 1)
+  const rows: string[] = []
+  const frameTop = 48
+  let y = frameTop + 26
+  const x = pad + 12
+  const line = (segs: Seg[]) => {
+    rows.push(`<text y="${y}" xml:space="preserve">${tspans(segs, x, cw)}</text>`)
+    y += lh
+  }
+  line(view.header)
+  view.task.forEach(line)
+  line(view.step)
+  view.details.forEach(line)
+  view.list.forEach(item => line(item.segs))
+  if (view.strip) line(view.strip)
+  // Plain buttons, as the terminal draws them: the hotkey, a colon, the label.
+  const key = (k: string, label: string): Seg[] => [{ text: `${k}: `, color: 'claude' }, { text: `${label}  ` }]
+  line([...key('p', '◀ prev'), ...key('n', 'next ▶'), ...key('c', 'close')])
+
+  const frameWidth = COLS * cw + 24
+  const frameHeight = y - frameTop - 6
+  const width = Math.round(pad * 2 + frameWidth)
+  const height = Math.round(frameTop + frameHeight + 18)
+  const frame = `<rect x="${pad}" y="${frameTop}" width="${frameWidth.toFixed(1)}" height="${frameHeight}" rx="6" fill="none" stroke="#30363d" stroke-width="1"/>
+<text x="${(pad + frameWidth - 16).toFixed(1)}" y="${frameTop + 4}" fill="${COLORS.dim}" font-size="12">✕</text>`
+  return windowSvg(width, height, `${frame}\n${rows.join('\n')}`)
+}
+
+// ── The idle band and the handoff ───────────────────────────────────────────
+
+// The mock-up's session eighteen minutes after its turn: context at 82%, the
+// prompt cache counting down, the turn offered for replay.
+function renderHandoffSvg(): string {
+  const COLS = 118
+  const cw = 8.43
+  const lh = 19
+  const pad = 22
+  const top = 44
+  // The turn took 2m15s; its last request went out 20 seconds before it
+  // ended, and the band is drawn 18 minutes after that: 42 minutes to go.
+  const end = Date.UTC(2026, 9, 8, 6, 35, 15)
+  const lastRequest = end - 20_000
+  const now = lastRequest + 18 * 60_000
+  let h = sampleHud(end)
+  h = hud.applyUsage(h, { context: { tokens: 821_000, window: 1_000_000, percent: 82 } })
+  h = hud.addRequestUsage(
+    h,
+    { input_tokens: 200, output_tokens: 300, cache_read_input_tokens: 820_000, cache_creation_input_tokens: 1_000, ephemeral_1h_input_tokens: 1_000 },
+    6_000,
+    lastRequest,
+  )
+  h = { ...h, turn: { ...h.turn, startedAt: end - 135_000 } }
+  h = hud.completeTurn(h, 135_000, end, 'answer')
+  h = { ...h, replay: { ...sampleReplay(end - 135_000), turn: h.turn.count, endedAt: end } }
+  const rows: string[] = []
+  let y = top + 14
+  const line = (segs: Seg[], x = pad) => {
+    rows.push(`<text y="${y}" xml:space="preserve">${tspans(segs, x, cw)}</text>`)
+    y += lh
+  }
+  line([{ text: '⏺ ', color: 'success' }, { text: 'Added retries with exponential backoff to ' }, { text: 'fetchJson', color: 'suggestion' }, { text: ': 4 tries, on 503s and timeouts only. All 6 new tests pass.' }])
+  line([{ text: '✻ ', color: 'claude' }, { text: 'Worked for 2m15s', dim: true }])
+  y += 10
+
+  for (const row of buildBand(h, now, COLS, { warnPercent: 60, criticalPercent: 80 })) {
+    const rightWidth = displayWidth(row.right.map(s => s.text).join(''))
+    rows.push(`<text y="${y}" xml:space="preserve">${tspans(row.left, pad, cw)}</text>`)
+    if (row.right.length) rows.push(`<text y="${y}" xml:space="preserve">${tspans(row.right, pad + (COLS - rightWidth) * cw, cw)}</text>`)
+    y += lh
+  }
+  // The handoff row the mod adds past handoffPercent: a primary button, as
+  // the terminal draws one, and what it does.
+  line([{ text: '[ ⇢ handoff ]', color: 'claude', bold: true }, { text: '  context 82%: save a summary, clear, and start over with it', dim: true }])
+
+  y += 4
+  const ruleWidth = COLS * cw
+  rows.push(`<rect x="${pad}" y="${y - 13}" width="${ruleWidth}" height="1" fill="#30363d"/>`)
+  y += 8
+  line([{ text: '❯ ', color: 'text' }, { text: '▌', color: 'suggestion' }])
+  rows.push(`<rect x="${pad}" y="${y - 13}" width="${ruleWidth}" height="1" fill="#30363d"/>`)
+  return windowSvg(Math.round(pad * 2 + COLS * cw), Math.round(y + 6), rows.join('\n'))
 }
 
 // ── The spinner demo ────────────────────────────────────────────────────────
@@ -250,5 +402,7 @@ function renderDemoGif(out: string): void {
 }
 
 writeFileSync(join(ROOT, 'assets/hud.svg'), renderHudSvg())
+writeFileSync(join(ROOT, 'assets/replay.svg'), renderReplaySvg())
+writeFileSync(join(ROOT, 'assets/handoff.svg'), renderHandoffSvg())
 renderDemoGif(join(ROOT, 'assets/demo.gif'))
-console.log('wrote assets/hud.svg and assets/demo.gif')
+console.log('wrote assets/hud.svg, assets/replay.svg, assets/handoff.svg and assets/demo.gif')

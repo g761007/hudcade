@@ -132,6 +132,8 @@ Claude 工作時，等待動畫會換成一組 8-bit 小場景，每回合都會
 
 ### 回合重播
 
+<img src="assets/replay.svg" alt="重播 pane 停在回合的最後一步：測試指令和輸出，以及這回合 8 個步驟的結果和每次修改的增刪行數" width="624">
+
 呼叫過工具的回合結束後，閒置的資訊列會出現 `▶ /hud replay (8 steps)`。執行 `/hud replay` 會開一個 pane，停在這回合的第一個工具呼叫。步驟要自己切換：按 `n`、`p`，或直接點清單裡的某一步。最後一步之後是總結：回合怎麼結束、共幾步、失敗幾次、用了幾個 agent，以及修改的總增刪行數。
 
 每一步會顯示：
@@ -153,6 +155,8 @@ pane 會用 Claude Code 允許的最大空間：全螢幕版面停靠在對話�
 沒有呼叫工具的回合不會蓋掉上一次的重播。每個專案最後一次的重播也會存到磁碟上，所以重開 Claude Code、`/clear`，或對話被移到新的 session 之後都還在；這時 `/hud replay` 會標明它來自之前的 session。
 
 ### 一鍵交接
+
+<img src="assets/handoff.svg" alt="context 82% 時閒置的 HUD 資訊列：重播提示、快取倒數和交接按鈕" width="100%">
 
 context 達到 `handoffPercent`（預設 80%，也可以用 `/hud handoff-at 70` 直接調整）後，閒置的資訊列會出現 `⇢ handoff` 按鈕，可以直接點，或在資訊列取得鍵盤焦點後按 `h`。也可以隨時輸入 `/hud handoff` 手動觸發。流程如下：
 

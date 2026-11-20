@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="624" height="466" viewBox="0 0 624 466" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="14">
+<rect width="624" height="466" rx="10" fill="#0d1117"/>
+<rect width="624" height="32" rx="10" fill="#161b22"/><rect y="22" width="624" height="10" fill="#161b22"/>
+<circle cx="20" cy="16" r="6" fill="#ff5f57"/><circle cx="40" cy="16" r="6" fill="#febc2e"/><circle cx="60" cy="16" r="6" fill="#28c840"/>
+<text x="312" y="21" text-anchor="middle" fill="#8b949e" font-size="12">~/code/my-app — claude</text>
+<rect x="22" y="48" width="580.4" height="400" rx="6" fill="none" stroke="#30363d" stroke-width="1"/>
+<text x="586.4" y="52" fill="#8b949e" font-size="12">✕</text>
+<text y="74" xml:space="preserve"><tspan x="34.0" fill="#e6edf3" font-weight="700">▶ step 8 / 8</tspan><tspan x="135.2" fill="#8b949e"> · turn 7 · 1:26 / 2:15</tspan></text>
+<text y="93" xml:space="preserve"><tspan x="34.0" fill="#8b949e">“add retries with backoff to the HTTP client and test them”</tspan></text>
+<text y="112" xml:space="preserve"><tspan x="34.0" fill="#58a6ff" font-weight="700">Bash</tspan><tspan x="67.7" fill="#e6edf3"> Run the test suite</tspan><tspan x="227.9" fill="#e6edf3"> </tspan><tspan x="236.3" fill="#3fb950">✓</tspan><tspan x="244.8" fill="#8b949e"> 0:08</tspan></text>
+<text y="131" xml:space="preserve"><tspan x="34.0" fill="#8b949e">description  </tspan><tspan x="143.6" fill="#e6edf3">Run the test suite</tspan></text>
+<text y="150" xml:space="preserve"><tspan x="34.0" fill="#8b949e">command      </tspan><tspan x="143.6" fill="#e6edf3">npm test -- src/http</tspan></text>
+<text y="169" xml:space="preserve"><tspan x="34.0" fill="#8b949e">│ </tspan><tspan x="50.9" fill="#8b949e"> PASS  src/http/client.test.ts</tspan></text>
+<text y="188" xml:space="preserve"><tspan x="34.0" fill="#8b949e">│ </tspan><tspan x="50.9" fill="#8b949e">  ✓ retries a 503 with backoff (12 ms)</tspan></text>
+<text y="207" xml:space="preserve"><tspan x="34.0" fill="#8b949e">│ </tspan><tspan x="50.9" fill="#8b949e">  ✓ gives up after 4 tries (8 ms)</tspan></text>
+<text y="226" xml:space="preserve"><tspan x="34.0" fill="#8b949e">│ </tspan><tspan x="50.9" fill="#8b949e">  ✓ does not retry a 400 (2 ms)</tspan></text>
+<text y="245" xml:space="preserve"><tspan x="34.0" fill="#8b949e">│ </tspan><tspan x="50.9" fill="#8b949e"></tspan></text>
+<text y="264" xml:space="preserve"><tspan x="34.0" fill="#8b949e">│ </tspan><tspan x="50.9" fill="#8b949e">Tests:  6 passed, 6 total</tspan></text>
+<text y="283" xml:space="preserve"><tspan x="34.0" fill="#e6edf3">  1 </tspan><tspan x="67.7" fill="#3fb950">✓</tspan><tspan x="76.2" fill="#e6edf3"> Read  client.ts                                        </tspan><tspan x="548.2" fill="#8b949e"> 0:00</tspan></text>
+<text y="302" xml:space="preserve"><tspan x="34.0" fill="#e6edf3">  2 </tspan><tspan x="67.7" fill="#3fb950">✓</tspan><tspan x="76.2" fill="#e6edf3"> Grep  fetchJson                                        </tspan><tspan x="548.2" fill="#8b949e"> 0:01</tspan></text>
+<text y="321" xml:space="preserve"><tspan x="34.0" fill="#e6edf3">  3 </tspan><tspan x="67.7" fill="#3fb950">✓</tspan><tspan x="76.2" fill="#e6edf3"> Agent find every caller of fetchJson               </tspan><tspan x="514.5" fill="#58a6ff"> ⤷ 3</tspan><tspan x="548.2" fill="#8b949e"> 0:41</tspan></text>
+<text y="340" xml:space="preserve"><tspan x="34.0" fill="#e6edf3">  4 </tspan><tspan x="67.7" fill="#3fb950">✓</tspan><tspan x="76.2" fill="#e6edf3"> Edit  client.ts                                  </tspan><tspan x="497.6" fill="#3fb950"> +1</tspan><tspan x="522.9" fill="#f85149"> −1</tspan><tspan x="548.2" fill="#8b949e"> 0:01</tspan></text>
+<text y="359" xml:space="preserve"><tspan x="34.0" fill="#e6edf3">  5 </tspan><tspan x="67.7" fill="#3fb950">✓</tspan><tspan x="76.2" fill="#e6edf3"> Write client.test.ts                            </tspan><tspan x="489.2" fill="#3fb950"> +64</tspan><tspan x="522.9" fill="#f85149"> −0</tspan><tspan x="548.2" fill="#8b949e"> 0:01</tspan></text>
+<text y="378" xml:space="preserve"><tspan x="34.0" fill="#e6edf3">  6 </tspan><tspan x="67.7" fill="#f85149">✗</tspan><tspan x="76.2" fill="#e6edf3"> Bash  Run the test suite                               </tspan><tspan x="548.2" fill="#8b949e"> 0:09</tspan></text>
+<text y="397" xml:space="preserve"><tspan x="34.0" fill="#e6edf3">  7 </tspan><tspan x="67.7" fill="#3fb950">✓</tspan><tspan x="76.2" fill="#e6edf3"> Edit  client.ts                                  </tspan><tspan x="497.6" fill="#3fb950"> +3</tspan><tspan x="522.9" fill="#f85149"> −1</tspan><tspan x="548.2" fill="#8b949e"> 0:01</tspan></text>
+<text y="416" xml:space="preserve"><tspan x="34.0" fill="#d97757" font-weight="700">▸ 8 </tspan><tspan x="67.7" fill="#3fb950">✓</tspan><tspan x="76.2" fill="#d97757" font-weight="700"> Bash  Run the test suite                               </tspan><tspan x="548.2" fill="#8b949e"> 0:08</tspan></text>
+<text y="435" xml:space="preserve"><tspan x="34.0" fill="#d97757">p: </tspan><tspan x="59.3" fill="#e6edf3">◀ prev  </tspan><tspan x="126.7" fill="#d97757">n: </tspan><tspan x="152.0" fill="#e6edf3">next ▶  </tspan><tspan x="219.5" fill="#d97757">c: </tspan><tspan x="244.7" fill="#e6edf3">close  </tspan></text>
+</svg>
