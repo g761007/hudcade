@@ -64,7 +64,7 @@ claude plugin install hudcade@hudcade
 | 行 | 顯示內容 |
 |---|---|
 | **身分** | model 與 effort · 專案與 branch（是否有未提交的修改、領先或落後幾個 commit）· 這個 session 增刪的行數與修改過的檔案數 · session 成本、這回合增加的金額、session 時長 |
-| **容量** | context 進度條、剩餘 token、壓縮次數 · prompt 快取命中率，閒置時另外顯示快取還能保留多久（`⏳4m`，過期後顯示 `cache cold`）· 5 小時與 7 天用量上限及重置倒數；照目前速度會超過 75% 時顯示預測（`→92%`，或 `→full in 50m`） |
+| **容量** | context 進度條、剩餘 token、壓縮次數 · prompt 快取命中率，閒置時另外顯示快取還能保留多久，從主對話最後一次送出請求開始算，subagent 的請求不算（`⏳42m`；剩 5 分鐘內變黃色並跳出提醒；過期後以紅色顯示 `cache expired · next prompt rebuilds it`）· 5 小時與 7 天用量上限及重置倒數；照目前速度會超過 75% 時顯示預測（`→92%`，或 `→full in 50m`） |
 | **活動** | 工作中、等待你確認權限或閒置（上一回合被中斷或失敗時會標示出來）· 回合數、開始時間（結束後顯示開始與結束時間）· 正在執行的工具 · 本回合送出與收到的 token · 輸出速度 · 工具呼叫次數與失敗數 · task 進度 |
 | **逐步摘要** | 由小模型隨著工具步驟寫出的一行摘要，說明這回合正在做什麼。要開啟 `recap` 才會出現 |
 | **context 組成** | 佔用 context 最多的幾個部分。只在超過警告門檻時出現 |
@@ -198,7 +198,7 @@ Session：11fa1a35
 
 指令：
 
-- `/hud`：顯示哪些功能已開啟、設定來源，以及 HUD 目前讀到的資料。
+- `/hud`：顯示哪些功能已開啟、設定來源，以及 HUD 目前讀到的資料，包括快取倒數的依據：`cache=1h · last main request sent 16:02:11 · expires 17:02:11 (in 42m)`。
 - `/hud agents`：開啟 agent 側邊 pane。
 - `/hud replay`：重播上一個呼叫過工具的回合。
 - `/hud test-notify`：發送一則 Telegram 測試訊息。

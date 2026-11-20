@@ -9,7 +9,7 @@
 //   workers    mate / bg / loop rows, while there are any (Claude Code lists
 //              subagents under the prompt itself)
 
-import type { AgentRun, Hud, RateWindow } from '../../types'
+import type { AgentRun, CacheStats, Hud, RateWindow } from '../../types'
 import {
   bar,
   clock,
@@ -24,7 +24,7 @@ import {
   truncate,
   usd,
 } from './format'
-import { agentWorkedMs, cacheHitPercent, cacheRemainingMs, rateForecast, withDefaults } from './hud-model'
+import { CACHE_WARN_MS, agentWorkedMs, cacheHitPercent, cacheRemainingMs, rateForecast, withDefaults } from './hud-model'
 
 export type Seg = { text: string; color?: string; dim?: boolean; bold?: boolean }
 export type Row = { left: Seg[]; right: Seg[] }
@@ -170,18 +170,19 @@ function forecastSegs(rate: RateWindow, now: number): Seg[] {
   return [{ text: ` →${Math.round(forecast.atResetPercent)}%`, color: 'warning' }]
 }
 
-// While idle, how long the prompt cache still holds the conversation: past
-// that, the next prompt writes it again.
+// While idle, how long the prompt cache still holds the conversation, amber
+// in its last five minutes; past that, red: the next prompt writes it again.
 function cacheGroup(h: Hud, now: number): Group | undefined {
   const hit = cacheHitPercent(h.cache)
   const remaining = h.turn.status === 'idle' ? cacheRemainingMs(h.cache, now) : undefined
   if (h.cache?.isCold || (remaining !== undefined && remaining <= 0)) {
     const cost = h.cache?.isCold && h.cache.rebuildUsd ? ` ~${usd(h.cache.rebuildUsd)}` : ''
-    return { priority: 4, side: 'right', segs: [{ text: `cache cold${cost}`, color: 'warning' }] }
+    return { priority: 4, side: 'right', segs: [{ text: `cache expired · next prompt rebuilds it${cost}`, color: 'error' }] }
   }
   if (hit === undefined) return undefined
+  const isEnding = remaining !== undefined && remaining <= CACHE_WARN_MS
   const countdown: Seg[] =
-    remaining !== undefined ? [{ text: ` ⏳${compactDuration(remaining)}`, color: remaining < 60_000 ? 'warning' : undefined, dim: remaining >= 60_000 }] : []
+    remaining !== undefined ? [{ text: ` ⏳${compactDuration(remaining)}`, color: isEnding ? 'warning' : undefined, dim: !isEnding }] : []
   const last = h.cache?.lastHitPercent
   const isMiss = last !== undefined && last < 50 && (h.cache?.requests ?? 0) > 1
   return {
@@ -348,6 +349,20 @@ function agentLoad(a: AgentRun): Seg[] {
 }
 
 // The line under an Agent call's transcript row while its agent runs.
+// For /hud: what the cache countdown counts from, to check it against the
+// clock: its lifetime, when the main conversation's last request was sent,
+// and when the cache runs out.
+export function cacheStatus(cache: CacheStats | undefined, now: number, tzOffsetMinutes?: number): string {
+  if (cache?.lastRequestAt === undefined) return 'cache=— (no main-conversation request yet)'
+  const sent = `last main request sent ${wallClock(cache.lastRequestAt, tzOffsetMinutes)}`
+  const cold = cache.isCold ? ' · cold (resumed past its lifetime)' : ''
+  const remaining = cacheRemainingMs(cache, now)
+  if (!cache.ttl || remaining === undefined) return `cache=lifetime unknown (no request has written it yet) · ${sent}${cold}`
+  const at = wallClock(now + remaining, tzOffsetMinutes)
+  const left = remaining > 0 ? `in ${compactDuration(remaining)}` : `${compactDuration(-remaining)} ago`
+  return `cache=${cache.ttl} · ${sent} · expires ${at} (${left})${cold}`
+}
+
 export function agentSummary(a: AgentRun, now: number): string {
   return `  ↳ ${agentRow(a, now, { hasDescription: false })
     .map(seg => seg.text)

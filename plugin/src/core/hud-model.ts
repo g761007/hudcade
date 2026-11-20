@@ -6,6 +6,8 @@ import { msUntil } from './format'
 
 export const DONE_AGENT_TTL_MS = 60_000
 const TTL_MS = { '5m': 300_000, '1h': 3_600_000 } as const
+// In its last five minutes the cache countdown turns amber, and a toast says so.
+export const CACHE_WARN_MS = 300_000
 const MAX_AGENT_SAMPLES = 8
 const AGENT_LIST_GRACE_MS = 10_000
 const MAX_RUNNING_TOOLS = 50

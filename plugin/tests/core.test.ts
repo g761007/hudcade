@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import type { Hud, Replay, ReplayStep } from '../types'
-import { agentSummary, buildBand, displayWidth, paneRows, rowText } from '../src/core/band'
+import { agentSummary, buildBand, cacheStatus, displayWidth, paneRows, rowText } from '../src/core/band'
 import { parseEnvFile, resolveConfig } from '../src/core/config'
 import { bar, clock, compactDuration, modelLabel, msUntil, parseTzOffset, preciseDuration, sanitize, sparkline, tokens, toolDetail, wallClock } from '../src/core/format'
 import { cleanRecap, recapRequest } from '../src/core/recap'
@@ -417,7 +417,7 @@ describe('band', () => {
     h = applyUsage(h, { context: { window: 1_000_000 } })
     expect(texts(h)[1]).toContain('25%')
     expect(texts(h)[1]).toContain('750k left')
-    expect(texts(h)[1]).toContain('cache cold ~$0.85')
+    expect(texts(h)[1]).toContain('cache expired · next prompt rebuilds it ~$0.85')
   })
 
   test('turn tokens and output speed come from the turn requests', () => {
@@ -808,16 +808,39 @@ describe('prompt cache lifetime', () => {
     expect(cacheRemainingMs(h.cache, 0)).toBeUndefined()
   })
 
-  test('the idle band counts down, then says cold', () => {
+  test('the idle band counts down, amber in the last five minutes; expired, red, saying the next prompt rebuilds it', () => {
     let h = startTurn(emptyHud('p'), 0)
-    h = addRequestUsage(h, usage({ ephemeral_5m_input_tokens: 100, ephemeral_1h_input_tokens: 0 }), 1_000, 0)
-    const working = buildBand(h, 10_000, 200, { warnPercent: 60, criticalPercent: 80 }).map(rowText).join('\n')
-    expect(working).not.toContain('⏳')
+    h = addRequestUsage(h, usage({ ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 100 }), 1_000, 0)
+    const OPTIONS = { warnPercent: 60, criticalPercent: 80 }
+    expect(buildBand(h, 10_000, 200, OPTIONS).map(rowText).join('\n')).not.toContain('⏳')
     h = completeTurn(h, 20_000, 20_000)
-    const at = (now: number) => buildBand(h, now, 200, { warnPercent: 60, criticalPercent: 80 }).map(rowText).join('\n')
-    expect(at(60_000)).toContain('⏳4m')
-    expect(at(260_000)).toContain('⏳40s')
-    expect(at(300_000)).toContain('cache cold')
+    const cell = (now: number) =>
+      buildBand(h, now, 200, OPTIONS)
+        .flatMap(row => [...row.left, ...row.right])
+        .find(seg => seg.text.startsWith(' ⏳') || seg.text.startsWith('cache expired'))
+    expect(cell(60_000)).toMatchObject({ text: ' ⏳59m', dim: true })
+    expect(cell(60_000)!.color).toBeUndefined()
+    expect(cell(3_300_000)).toMatchObject({ text: ' ⏳5m', color: 'warning' })
+    expect(cell(3_560_000)).toMatchObject({ text: ' ⏳40s', color: 'warning' })
+    expect(cell(3_600_000)).toEqual({ text: 'cache expired · next prompt rebuilds it', color: 'error' })
+  })
+})
+
+describe('cache status for /hud', () => {
+  const usage = { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 900, cache_creation_input_tokens: 100, ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 100 }
+  // 2026-11-20 16:02:11 in Taipei (UTC+8).
+  const sent = Date.UTC(2026, 10, 20, 8, 2, 11)
+
+  test('the lifetime, when the last main request was sent and when the cache runs out, in local time', () => {
+    const h = addRequestUsage(emptyHud('p'), usage, 1_000, sent)
+    expect(cacheStatus(h.cache, sent + 18 * 60_000, 480)).toBe('cache=1h · last main request sent 16:02:11 · expires 17:02:11 (in 42m)')
+    expect(cacheStatus(h.cache, sent + 63 * 60_000, 480)).toBe('cache=1h · last main request sent 16:02:11 · expires 17:02:11 (3m ago)')
+  })
+
+  test('before any request, or before one has written the cache, it says so', () => {
+    expect(cacheStatus(undefined, sent, 480)).toBe('cache=— (no main-conversation request yet)')
+    const readOnly = addRequestUsage(emptyHud('p'), { ...usage, cache_creation_input_tokens: 0, ephemeral_1h_input_tokens: 0 }, 1_000, sent)
+    expect(cacheStatus(readOnly.cache, sent, 480)).toBe('cache=lifetime unknown (no request has written it yet) · last main request sent 16:02:11')
   })
 })
 

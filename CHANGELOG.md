@@ -17,6 +17,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   last replay of each project is kept on disk, so it outlives a restart. The
   idle band offers it once such a turn ends.
 
+### Changed
+
+- The idle band's prompt-cache countdown turns amber five minutes before
+  the cache runs out, and a toast says so once. Run out, it reads `cache
+  expired · next prompt rebuilds it` in red instead of `cache cold`.
+- `/hud` shows what the countdown counts from: the cache's lifetime, when
+  the main conversation's last request was sent, and when the cache runs
+  out.
+
+### Fixed
+
+- After a reload of the mod, an idle band counts the cache down again
+  instead of waiting for the next turn.
+
 ## [0.3.0] - 2026-11-20
 
 ### Removed

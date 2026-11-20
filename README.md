@@ -64,7 +64,7 @@ Above the prompt, in the terminal and in the desktop app. Each row has a left an
 | Row | What it tells you |
 |---|---|
 | **Identity** | Model and effort · project and branch (dirty, ahead/behind) · lines added and removed and files edited this session · session cost, what this turn added, session time |
-| **Capacity** | Context bar, tokens left and compactions · prompt-cache hit ratio, and while idle how long the cache still holds the conversation (`⏳4m`, then `cache cold`) · 5-hour and 7-day limits with reset countdowns, and a forecast once your pace heads past 75% (`→92%`, or `→full in 50m`) |
+| **Capacity** | Context bar, tokens left and compactions · prompt-cache hit ratio, and while idle how long the cache still holds the conversation, counted from the main conversation's last request (`⏳42m`; amber, with a toast, in its last five minutes; then, in red, `cache expired · next prompt rebuilds it`) · 5-hour and 7-day limits with reset countdowns, and a forecast once your pace heads past 75% (`→92%`, or `→full in 50m`) |
 | **Activity** | Working, waiting for your approval, or idle (interrupted or failed, when the last turn ended so) · turn number, start time (and end time once done) · the tool running now · tokens in and out this turn · output speed · tool calls and failures · task progress |
 | **Step recap** | One line on what the turn is doing, written by a small model as its steps go by. Off unless you turn on `recap`. |
 | **Context breakdown** | The largest parts of the window. Only appears once context passes the warning threshold. |
@@ -172,7 +172,7 @@ Per project, `.claude/claude-mods.json` (shared with the team) and `.claude/clau
 
 Commands:
 
-- `/hud`: what is switched on, where the settings came from, and what the HUD has read.
+- `/hud`: what is switched on, where the settings came from, and what the HUD has read, including what the cache countdown counts from: `cache=1h · last main request sent 16:02:11 · expires 17:02:11 (in 42m)`.
 - `/hud agents`: open the agents pane.
 - `/hud replay`: replay the last turn that called tools.
 - `/hud test-notify`: send a test Telegram message.

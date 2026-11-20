@@ -9,9 +9,9 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, Timer } from 'claude-code'
 
 import type { AgentRun, Hud, Replay, ReplayStep, SceneName } from '../types'
-import { agentSummary, buildBand, paneRows, type Seg } from '../src/core/band'
+import { agentSummary, buildBand, cacheStatus, paneRows, type Seg } from '../src/core/band'
 import { createRuntime, parseEnvFile, resolveConfig, type Layer, type Runtime } from '../src/core/config'
-import { basename, clock, modelLabel, parseTzOffset, sanitize, tokens, toolDetail, toolLabel, truncate, usd } from '../src/core/format'
+import { basename, clock, compactDuration, modelLabel, parseTzOffset, sanitize, tokens, toolDetail, toolLabel, truncate, usd } from '../src/core/format'
 import { cleanRecap, recapRequest, type RecapStep } from '../src/core/recap'
 import { applyEdit, editHunks } from '../src/core/diff'
 import {
@@ -41,6 +41,7 @@ import {
   agentTurnEnded,
   applyResume,
   applyUsage,
+  CACHE_WARN_MS,
   cacheRemainingMs,
   completeTurn,
   emptyHud,
@@ -144,6 +145,8 @@ let lastRecapAt = Number.NEGATIVE_INFINITY
 // Background agents seen running while no turn ran, by row key: what each is.
 const awaitedAgents = new Map<string, string>()
 let agentsSettleTimer: Timer | undefined
+// The request the cache's lifetime counted from when the toast said it was ending.
+let cacheWarnedFor: number | undefined
 // The replay pane: the agents' tracks the person went into from the main
 // line, the step shown on each line, and whether its diff is open.
 let replayPath: string[] = []
@@ -452,11 +455,16 @@ async function countCompaction($: EngineInterface): Promise<void> {
   await patch($, h => noteCompaction(h))
 }
 
-// Redraws the idle band while it counts down the prompt cache's lifetime.
+// Redraws the idle band while it counts down the prompt cache's lifetime,
+// and once in its last five minutes says so in a toast.
 async function syncIdleRedraw($: EngineInterface): Promise<void> {
   const [h, now] = await Promise.all([snapshot($), $.clock.now()])
   const remaining = cacheRemainingMs(h.cache, now)
   const isNeeded = runtime.config.hud && h.turn.status === 'idle' && remaining !== undefined && remaining > 0
+  if (isNeeded && remaining <= CACHE_WARN_MS && cacheWarnedFor !== h.cache?.lastRequestAt) {
+    cacheWarnedFor = h.cache?.lastRequestAt
+    $.ui.toast(`Prompt cache expires in ${compactDuration(remaining)}; after that, the next prompt rebuilds it`, { timeoutMs: 15_000 })
+  }
   if (isNeeded && !idleTimer) {
     idleTimer = $.clock.every(IDLE_REDRAW_MS, () => {
       $.ui.invalidate('ui.render')
@@ -717,6 +725,8 @@ export const register: Register = (on, options) => {
     }
     await refreshGit($, true)
     runtime.warnings.push(...failed)
+    // An idle session (one just reloaded too) counts the cache down again.
+    void syncIdleRedraw($)
     return next(e)
   })
 
@@ -767,7 +777,7 @@ export const register: Register = (on, options) => {
           : 'The replay pane opens once the window has room for it.',
       }
     }
-    return { text: statusText(runtime, await snapshot($)) }
+    return { text: statusText(runtime, await snapshot($), await $.clock.now()) }
   })
 
   // ── Turns ─────────────────────────────────────────────────────────────────
@@ -1371,7 +1381,7 @@ export const register: Register = (on, options) => {
   })
 }
 
-function statusText(runtime: Runtime, hud: Hud): string {
+function statusText(runtime: Runtime, hud: Hud, now: number): string {
   const { config } = runtime
   const onOff = (flag: boolean) => (flag ? 'on' : 'off')
   const lines = [
@@ -1383,6 +1393,7 @@ function statusText(runtime: Runtime, hud: Hud): string {
     `hud data: project=${hud.project || '—'} · model=${hud.model ?? '—'} · effort=${hud.effort ?? '—'} · turn=${hud.turn.count} (${hud.turn.status})`,
     `          ctx=${hud.ctx ? `${hud.ctx.percent ?? '?'}% of ${hud.ctx.window}` : '— (no reading yet)'} · rate limits=${hud.rates.length} · cost=${hud.costUsd !== undefined ? usd(hud.costUsd) : '—'}`,
     `          git=${hud.git ? hud.git.branch : `— (${gitNote})`} · tools=${hud.tools.total} · agents=${hud.agents.length} · tasks=${hud.tasks.length}`,
+    `          ${cacheStatus(hud.cache, now, hud.tzOffsetMinutes)}`,
   ]
   if (runtime.warnings.length > 0) lines.push('warnings:', ...runtime.warnings.map(w => `  - ${w}`))
   return lines.join('\n')

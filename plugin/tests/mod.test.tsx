@@ -616,7 +616,52 @@ describe('prompt cache countdown', () => {
     await $.turn.complete({ answer: 'ok', durationMs: 1_000, isAborted: false, turnId: 't1', reason: 'answer' } as never)
     expect(await bandText($)).toContain('⏳')
     await clock.advance(300_000)
-    expect(await bandText($)).toContain('cache cold')
+    expect(await bandText($)).toContain('cache expired · next prompt rebuilds it')
+  })
+
+  test('five minutes before the cache runs out, one toast; a subagent’s requests renew nothing', async ($, on) => {
+    const clock = mock.clock(on)
+    engineDraws(on)
+    const usage = { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 900, cache_creation_input_tokens: 100, ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 100 }
+    const toasts: string[] = []
+    on('ui.toast', (_$, e) => {
+      toasts.push(e.text)
+      return { value: undefined } as never
+    })
+    on('turn.start', (_$, e) => ({ turnId: e.turnId }))
+    on('turn.step', async function* (_$, e) {
+      yield { kind: 'stop', stopReason: 'end_turn', usage } as never
+      return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn', usage } as never
+    })
+    on('turn.complete', (_$, e) => ({ text: e.answer }) as never)
+    const request = async (agentId?: string) => {
+      for await (const _chunk of $.turn.step({ turnId: 't1', index: 0, model: 'claude-opus-5-5', messageCount: 1, agentId } as never)) {
+        // The request's one chunk carries its usage.
+      }
+    }
+
+    await $.turn.start({ text: 'hi', turnId: 't1' })
+    await request()
+    await $.turn.complete({ answer: 'ok', durationMs: 1_000, isAborted: false, turnId: 't1', reason: 'answer' } as never)
+    // A background agent's request half an hour on renews nothing.
+    await clock.advance(30 * 60_000)
+    await request('ag1')
+    await clock.advance(24 * 60_000)
+    expect(toasts).toEqual([])
+    expect(await bandText($)).toContain('⏳6m')
+    // /hud says what the countdown counts from: the main request, not the agent's.
+    const status = (await $.command.run({ command: 'hud', args: '' } as never)) as { text: string }
+    expect(status.text).toMatch(/cache=1h · last main request sent \d\d:\d\d:\d\d · expires \d\d:\d\d:\d\d \(in 6m\)/)
+
+    // At 55 minutes.
+    await clock.advance(75_000)
+    expect(toasts).toEqual(['Prompt cache expires in 5m; after that, the next prompt rebuilds it'])
+    await clock.advance(3 * 60_000)
+    expect(toasts).toHaveLength(1)
+    // An hour after the main conversation's last request.
+    await clock.advance(2 * 60_000)
+    expect(await bandText($)).toContain('cache expired · next prompt rebuilds it')
+    expect(toasts).toHaveLength(1)
   })
 })
 
