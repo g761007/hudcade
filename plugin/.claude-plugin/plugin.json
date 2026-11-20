@@ -51,6 +51,12 @@
       "description": "Context usage at which the HUD turns red and shows a toast.",
       "default": 80
     },
+    "handoffPercent": {
+      "type": "number",
+      "title": "Handoff button %",
+      "description": "Context usage from which the band offers a one-click handoff (a whole number from 1 to 100). /hud handoff-at <percent> sets it from the prompt, over this option.",
+      "default": 80
+    },
     "recap": {
       "type": "boolean",
       "title": "Step recap",

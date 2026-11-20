@@ -148,6 +148,16 @@ pane 會用 Claude Code 允許的最大空間：全螢幕版面停靠在對話�
 
 沒有呼叫工具的回合不會蓋掉上一次的重播。每個專案最後一次的重播也會存到磁碟上，所以重開 Claude Code、`/clear`，或對話被移到新的 session 之後都還在；這時 `/hud replay` 會標明它來自之前的 session。
 
+### 一鍵交接
+
+context 達到 `handoffPercent`（預設 80%，也可以用 `/hud handoff-at 70` 直接調整）後，閒置的資訊列會出現 `⇢ handoff` 按鈕，可以直接點，或在資訊列取得鍵盤焦點後按 `h`。也可以隨時輸入 `/hud handoff` 手動觸發。流程如下：
+
+1. 另外帶著對話內容請模型寫一份交接摘要，分成五段：目前的目標、做完了什麼、還沒做的、改過哪些檔案、要注意的地方。這次會用到快取裡的對話內容，而且不會加進原本的對話。
+2. 摘要存成 `~/.claude/handoffs/<專案>/<日期>-<時間>-handoff.md`。
+3. 清空對話，再把摘要連同檔案路徑當成新對話的第一句送出。
+
+執行中資訊列會顯示目前進行到哪一步。如果沒有拿到摘要，或檔案存不下來，對話會維持原樣，不會被清空。
+
 ### Telegram 通知
 
 ```
@@ -179,6 +189,7 @@ Session：11fa1a35
 | `spinner` | `true` | 像素等待動畫（終端機） |
 | `spinnerScene` | `random` | `random`，或 `robot`、`coffee`、`garden`、`rocket`、`cat`、`fishing`、`train`、`campfire`、`weather`、`equalizer` 其中一組 |
 | `ctxWarnPercent` / `ctxCriticalPercent` | `60` / `80` | context 的警告與危險門檻，影響顏色、跳出提示和 context 組成行 |
+| `handoffPercent` | `80` | context 用到多少時，資訊列出現一鍵交接按鈕；用 `/hud handoff-at` 設定的值優先 |
 | `recap` | `false` | 逐步摘要行：由小模型摘要進行中的回合（費用算在你的 session） |
 | `recapModel` | `haiku` | 撰寫逐步摘要的 model 別名或 id |
 | `notify` | `true` | Telegram 通知 |
@@ -201,6 +212,8 @@ Session：11fa1a35
 - `/hud`：顯示哪些功能已開啟、設定來源，以及 HUD 目前讀到的資料，包括快取倒數的依據：`cache=1h · last main request sent 16:02:11 · expires 17:02:11 (in 42m)`。
 - `/hud agents`：開啟 agent 側邊 pane。
 - `/hud replay`：重播上一個呼叫過工具的回合。
+- `/hud handoff`：存一份交接摘要、清空對話，再用摘要開始新對話。
+- `/hud handoff-at <百分比>`：設定 context 用到多少時出現交接按鈕（1 到 100），之後每個 session 都有效；不加數字會顯示目前的值；`default` 會回到 `handoffPercent` 選項的值。
 - `/hud test-notify`：發送一則 Telegram 測試訊息。
 
 ## 運作方式

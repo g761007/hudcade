@@ -13,6 +13,7 @@ export type ModsConfig = {
   spinnerScene: SceneChoice
   ctxWarnPercent: number
   ctxCriticalPercent: number
+  handoffPercent: number
   recap: boolean
   recapModel: string
   notify: boolean
@@ -29,6 +30,7 @@ export const DEFAULTS: ModsConfig = {
   spinnerScene: 'random',
   ctxWarnPercent: 60,
   ctxCriticalPercent: 80,
+  handoffPercent: 80,
   recap: false,
   recapModel: 'haiku',
   notify: true,
@@ -46,6 +48,7 @@ const PROJECT_KEYS = [
   'spinnerScene',
   'ctxWarnPercent',
   'ctxCriticalPercent',
+  'handoffPercent',
   'recap',
   'recapModel',
   'notify',
@@ -61,6 +64,8 @@ export type Runtime = {
   warnings: string[]
   sources: string[]
   telegramSource?: string
+  // The handoff threshold set with /hud handoff-at, over the options.
+  handoffOverride?: number
 }
 
 export type Layer = { source: string; values: Record<string, unknown> }
@@ -118,6 +123,10 @@ function set(config: ModsConfig, key: string, value: unknown): string | undefine
       }
       config[key] = value
       return
+    case 'handoffPercent':
+      if (!isPercent(value)) return '"handoffPercent" must be a whole number from 1 to 100'
+      config.handoffPercent = value
+      return
     case 'spinnerScene':
       if (!SCENE_CHOICES.includes(value as SceneChoice)) return `"spinnerScene" must be one of ${SCENE_CHOICES.join(', ')}`
       config.spinnerScene = value as SceneChoice
@@ -143,6 +152,11 @@ function set(config: ModsConfig, key: string, value: unknown): string | undefine
     default:
       return `unknown key "${key}"`
   }
+}
+
+// A context share the handoff button can show from: a whole 1 to 100.
+export function isPercent(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 1 && value <= 100
 }
 
 // Parses KEY="value" lines of a shell env file (the old notify hook's format).

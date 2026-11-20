@@ -5,6 +5,7 @@ import { agentSummary, buildBand, cacheStatus, displayWidth, paneRows, rowText }
 import { parseEnvFile, resolveConfig } from '../src/core/config'
 import { bar, clock, compactDuration, modelLabel, msUntil, parseTzOffset, preciseDuration, sanitize, sparkline, tokens, toolDetail, wallClock } from '../src/core/format'
 import { cleanRecap, recapRequest } from '../src/core/recap'
+import { HANDOFF_PROMPT, handoffFile, handoffMessage, handoffPath } from '../src/core/handoff'
 import { applyEdit, diffSource, editHunks, takeLines } from '../src/core/diff'
 import {
   DIFF_LINES,
@@ -119,6 +120,18 @@ describe('format', () => {
 })
 
 describe('config', () => {
+  test('handoffPercent: 80 by default, a whole number from 1 to 100, and a project may set its own', () => {
+    expect(resolveConfig({}, []).config.handoffPercent).toBe(80)
+    expect(resolveConfig({ handoffPercent: 70 }, []).config.handoffPercent).toBe(70)
+    expect(resolveConfig({}, [{ source: '.claude/claude-mods.json', values: { handoffPercent: 65 } }]).config.handoffPercent).toBe(65)
+    const bad = resolveConfig({ handoffPercent: 0 }, [{ source: '.claude/claude-mods.json', values: { handoffPercent: 72.5 } }])
+    expect(bad.config.handoffPercent).toBe(80)
+    expect(bad.warnings).toEqual([
+      'userConfig: "handoffPercent" must be a whole number from 1 to 100',
+      '.claude/claude-mods.json: "handoffPercent" must be a whole number from 1 to 100',
+    ])
+  })
+
   test('out of the box nothing is blocklisted and the message language follows Claude Code', () => {
     const { config } = resolveConfig({}, [])
     expect(config.notifyBlocklist).toEqual([])
@@ -1213,5 +1226,28 @@ describe('turn replay', () => {
     expect(activity(h, 40)).toContain('idle · turn 1')
     const next = completeTurn(startTurn(h, 10_000), 1_000, 11_000)
     expect(activity(next, 200)).not.toContain('replay')
+  })
+})
+
+describe('handoff', () => {
+  // 2026-11-20 16:12:30 in Taipei (UTC+8).
+  const at = Date.UTC(2026, 10, 20, 8, 12, 30)
+
+  test('kept under the Claude folder by project, named by local time; a second in the same minute is numbered', () => {
+    expect(handoffPath('/Users/me', 'claude-mods', at, 480)).toBe('/Users/me/.claude/handoffs/claude-mods/2026-11-20-1612-handoff.md')
+    expect(handoffPath('/Users/me', 'claude-mods', at, 480, 2)).toBe('/Users/me/.claude/handoffs/claude-mods/2026-11-20-1612-2-handoff.md')
+    expect(handoffPath('/Users/me', 'my project/x', at, 480)).toBe('/Users/me/.claude/handoffs/my-project-x/2026-11-20-1612-handoff.md')
+    expect(handoffPath('/Users/me', '', at, 480)).toBe('/Users/me/.claude/handoffs/project/2026-11-20-1612-handoff.md')
+  })
+
+  test('the file is titled with the project and the time; the first prompt names the file and carries the summary', () => {
+    expect(handoffFile('## Goal\nShip it\n', 'claude-mods', at, 480)).toBe('# Handoff: claude-mods, 2026-11-20 16:12\n\n## Goal\nShip it\n')
+    const message = handoffMessage('## Goal\nShip it\n', '/Users/me/.claude/handoffs/claude-mods/2026-11-20-1612-handoff.md')
+    expect(message).toContain('also saved at /Users/me/.claude/handoffs/claude-mods/2026-11-20-1612-handoff.md')
+    expect(message.endsWith('\n\n## Goal\nShip it')).toBe(true)
+  })
+
+  test('the summary is asked for under the five headings', () => {
+    for (const heading of ['## Goal', '## Done', '## Not done yet', '## Files changed', '## Watch out for']) expect(HANDOFF_PROMPT).toContain(heading)
   })
 })

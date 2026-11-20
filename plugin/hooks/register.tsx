@@ -10,10 +10,11 @@ import type { EngineInterface, Register, Timer } from 'claude-code'
 
 import type { AgentRun, Hud, Replay, ReplayStep, SceneName } from '../types'
 import { agentSummary, buildBand, cacheStatus, paneRows, type Seg } from '../src/core/band'
-import { createRuntime, parseEnvFile, resolveConfig, type Layer, type Runtime } from '../src/core/config'
+import { createRuntime, isPercent, parseEnvFile, resolveConfig, type Layer, type Runtime } from '../src/core/config'
 import { basename, clock, compactDuration, modelLabel, parseTzOffset, sanitize, tokens, toolDetail, toolLabel, truncate, usd } from '../src/core/format'
 import { cleanRecap, recapRequest, type RecapStep } from '../src/core/recap'
 import { applyEdit, editHunks } from '../src/core/diff'
+import { HANDOFF_PROMPT, handoffFile, handoffMessage, handoffPath } from '../src/core/handoff'
 import {
   addStep,
   callFields,
@@ -147,6 +148,10 @@ const awaitedAgents = new Map<string, string>()
 let agentsSettleTimer: Timer | undefined
 // The request the cache's lifetime counted from when the toast said it was ending.
 let cacheWarnedFor: number | undefined
+// Where a one-click handoff stands while it runs; the band says so.
+let handoffStage: 'writing' | 'clearing' | 'starting' | undefined
+const HANDOFF_AT_KEY = 'handoffPercent'
+const HANDOFF_STAGES = { writing: 'writing the summary…', clearing: 'clearing the conversation…', starting: 'starting over with the summary…' }
 // The replay pane: the agents' tracks the person went into from the main
 // line, the step shown on each line, and whether its diff is open.
 let replayPath: string[] = []
@@ -182,6 +187,12 @@ async function loadRuntime($: EngineInterface): Promise<void> {
   const { config, warnings } = resolveConfig(values, layers)
   runtime.config = config
   runtime.warnings = [...readWarnings, ...warnings]
+  try {
+    const set = await $.store.get(HANDOFF_AT_KEY)
+    runtime.handoffOverride = isPercent(set) ? set : undefined
+  } catch {
+    // No override: the options say.
+  }
   runtime.sources = ['userConfig', ...layers.map(layer => layer.source)]
   runtime.telegramSource = config.telegramBotToken && config.telegramChatId ? 'userConfig' : undefined
 
@@ -647,6 +658,57 @@ function closeReplay($: EngineInterface): void {
   void $.ui.close({ id: REPLAY_PANE }).catch(() => undefined)
 }
 
+// ── One-click handoff ─────────────────────────────────────────────────────
+
+// The context share the band offers a handoff from.
+function handoffAt(): number {
+  return runtime.handoffOverride ?? runtime.config.handoffPercent
+}
+
+function setHandoffStage($: EngineInterface, stage: typeof handoffStage): void {
+  handoffStage = stage
+  $.ui.invalidate('ui.render')
+}
+
+// A summary of the conversation, written by a fork of it, is kept in a file;
+// then a /clear, and the summary is the new conversation's first prompt. A
+// summary that does not come, or cannot be kept, leaves the conversation as it
+// was. Runs on its own: the press or command that starts it returns at once.
+async function handoff($: EngineInterface): Promise<void> {
+  if (handoffStage) return
+  setHandoffStage($, 'writing')
+  let path: string | undefined
+  try {
+    const reply = await $.model.fork({ prompt: HANDOFF_PROMPT })
+    const summary = reply.isAnswered ? reply.text.trim() : ''
+    if (!summary) {
+      const why = reply.isAnswered ? 'the reply was empty' : reply.reason
+      $.ui.toast(`Handoff stopped: no summary came (${why}); the conversation is as it was.`, { timeoutMs: 10_000 })
+      return
+    }
+    const [h, now, home, root] = await Promise.all([snapshot($), $.clock.now(), $.env.get('HOME'), $.session.root()])
+    if (!home) {
+      $.ui.toast('Handoff stopped: HOME is not set, so the summary has nowhere to go; the conversation is as it was.', { timeoutMs: 10_000 })
+      return
+    }
+    const project = h.project || basename(root)
+    path = handoffPath(home, project, now, h.tzOffsetMinutes)
+    for (let n = 2; await $.fs.exists(path); n++) path = handoffPath(home, project, now, h.tzOffsetMinutes, n)
+    await $.fs.write(path, handoffFile(summary, project, now, h.tzOffsetMinutes))
+    setHandoffStage($, 'clearing')
+    // A prompt may not run a command: /clear goes through command.run, as if typed.
+    await $.command.run({ command: 'clear', args: '' })
+    setHandoffStage($, 'starting')
+    await $.prompt.submit({ text: handoffMessage(summary, path) })
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    const kept = path ? ` The summary is saved at ${path}.` : ' The conversation is as it was.'
+    $.ui.toast(`Handoff stopped: ${reason}.${kept}`, { timeoutMs: 15_000 })
+  } finally {
+    setHandoffStage($, undefined)
+  }
+}
+
 export const register: Register = (on, options) => {
   values = options as Record<string, unknown>
   runtime = createRuntime(values)
@@ -662,8 +724,8 @@ export const register: Register = (on, options) => {
     await $.command.register({
       name: 'hud',
       description:
-        'hudcade status; `/hud agents` opens the agents pane; `/hud replay` replays the last turn that called tools; `/hud test-notify` sends a test Telegram message',
-      argumentHint: '[agents|replay|test-notify]',
+        'hudcade status; `/hud agents` opens the agents pane; `/hud replay` replays the last turn that called tools; `/hud handoff` writes a handoff summary, clears and starts over with it; `/hud handoff-at <percent>` sets when the band offers it; `/hud test-notify` sends a test Telegram message',
+      argumentHint: '[agents|replay|handoff|handoff-at <percent>|test-notify]',
     })
     // Each fact is read on its own: one that fails must not blank the others,
     // and its reason shows in /hud.
@@ -742,6 +804,30 @@ export const register: Register = (on, options) => {
   })
 
   on('command.run', { command: 'hud' }, async ($, e) => {
+    const handoffAtArgs = /^handoff-at(?:\s+(\S+))?$/.exec(e.args.trim())
+    if (handoffAtArgs) {
+      const value = handoffAtArgs[1]
+      if (value === undefined) {
+        const from = runtime.handoffOverride === undefined ? 'the handoffPercent option' : '/hud handoff-at'
+        return { text: `The handoff button shows from ${handoffAt()}% context (set by ${from}). Change it with /hud handoff-at <1-100>, or go back to the option with /hud handoff-at default.` }
+      }
+      if (value === 'default') {
+        await $.store.delete(HANDOFF_AT_KEY)
+        runtime.handoffOverride = undefined
+      } else {
+        const percent = Number(value)
+        if (!isPercent(percent)) return { text: `"${value}" is not a whole number from 1 to 100; the handoff button still shows from ${handoffAt()}%.` }
+        await $.store.set(HANDOFF_AT_KEY, percent)
+        runtime.handoffOverride = percent
+      }
+      $.ui.invalidate('ui.render')
+      return { text: `The handoff button now shows from ${handoffAt()}% context.` }
+    }
+    if (e.args.trim() === 'handoff') {
+      if (handoffStage) return { text: 'A handoff is already under way.' }
+      void handoff($)
+      return { text: 'Writing a handoff summary; once it is saved, the conversation clears and starts over with it.' }
+    }
     if (e.args.trim() === 'test-notify') {
       return { text: `hudcade test notification: ${await notify($, 'test', {})}` }
     }
@@ -790,6 +876,15 @@ export const register: Register = (on, options) => {
       const agentId = e.agentId
       await patch($, h => resumeAgent(h, agentId, now))
       return next(e)
+    }
+    // A /clear goes on in a new session with no session.start: the band's
+    // project and branch are read again here.
+    if (!(await snapshot($)).project) {
+      const root = await $.session.root().catch(() => '')
+      if (root) {
+        await patch($, h => ({ ...h, project: basename(root) }))
+        void refreshGit($, true)
+      }
     }
     const h = await patch($, h => startTurn(h, now))
     syncTicker($, true)
@@ -1185,12 +1280,17 @@ export const register: Register = (on, options) => {
     if (!runtime.config.hud || e.props.hasSurvey) return next(e)
     const hud = await snapshot($)
     const now = await $.clock.now()
+    // Past the critical threshold, while idle, a row offers a handoff; while
+    // one runs, the row says where it stands.
+    const percent = hud.ctx?.percent
+    const isHandoffOffered = hud.turn.status === 'idle' && percent !== undefined && percent >= handoffAt()
+    const extra = handoffStage || isHandoffOffered ? 1 : 0
     const rows = buildBand(hud, now, Math.max(20, e.props.bodyColumns), {
       warnPercent: runtime.config.ctxWarnPercent,
       criticalPercent: runtime.config.ctxCriticalPercent,
       hasSpinner: runtime.config.spinner && e.surface === 'terminal',
-    }).slice(0, Math.max(1, e.props.maxRows))
-    const { Box, Text } = $.ui.resolve(e)
+    }).slice(0, Math.max(1, e.props.maxRows - extra))
+    const { Box, Text, Button } = $.ui.resolve(e)
     const texts = (segs: Seg[]) =>
       segs.map(seg => (
         <Text color={seg.color} dimColor={seg.dim} bold={seg.bold} wrap="truncate">
@@ -1205,6 +1305,16 @@ export const register: Register = (on, options) => {
             {row.right.length > 0 && <Box flexDirection="row">{texts(row.right)}</Box>}
           </Box>
         ))}
+        {handoffStage ? (
+          <Text color="suggestion" wrap="truncate">{`⇢ handoff: ${HANDOFF_STAGES[handoffStage]}`}</Text>
+        ) : (
+          isHandoffOffered && (
+            <Box flexDirection="row">
+              <Button key="handoff" variant="primary" hotkey="h" label="⇢ handoff" onPress={() => void handoff($)} />
+              <Text dimColor wrap="truncate">{`  context ${Math.round(percent)}%: save a summary, clear, and start over with it`}</Text>
+            </Box>
+          )
+        )}
       </Box>
     )
   })
@@ -1387,7 +1497,7 @@ function statusText(runtime: Runtime, hud: Hud, now: number): string {
   const lines = [
     'hudcade status',
     `modules: hud ${onOff(config.hud)} · spinner ${onOff(config.spinner)} (${config.spinnerScene}) · recap ${onOff(config.recap)} (${config.recapModel}) · notify ${onOff(config.notify)}`,
-    `context thresholds: warn ${config.ctxWarnPercent}% · critical ${config.ctxCriticalPercent}%`,
+    `context thresholds: warn ${config.ctxWarnPercent}% · critical ${config.ctxCriticalPercent}% · handoff button ${runtime.handoffOverride ?? config.handoffPercent}%${runtime.handoffOverride === undefined ? '' : ' (set with /hud handoff-at)'}`,
     `config sources: ${runtime.sources.join(', ')}`,
     `telegram: ${runtime.telegramSource ? `configured (${runtime.telegramSource})` : 'not configured'} · language ${config.notifyLanguage}`,
     `hud data: project=${hud.project || '—'} · model=${hud.model ?? '—'} · effort=${hud.effort ?? '—'} · turn=${hud.turn.count} (${hud.turn.status})`,

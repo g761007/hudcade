@@ -1037,3 +1037,152 @@ describe('turn replay', () => {
     expect(await replayText($, 'desktop')).toContain('▶ step 1 / 1')
   })
 })
+
+describe('one-click handoff', () => {
+  const SUMMARY = '## Goal\nShip the handoff\n\n## Done\nThe button'
+  const CONTEXT = (percent: number) => ({ context: { tokens: percent * 10_000, window: 1_000_000, percent }, rateLimits: [], cost: { usd: 1 } })
+
+  // The engine beneath: a fork that answers `fork`, files, the prompt box and toasts.
+  function engine(on: On, fork: () => unknown) {
+    const seen = { writes: [] as { path: string; text: string }[], commands: [] as string[], submitted: [] as string[], toasts: [] as string[] }
+    session(on)
+    on('session.measure', () => ({ changed: [] }) as never)
+    on('model.fork', () => fork() as never)
+    on('env.get', (_$, e) => ({ value: e.name === 'HOME' ? '/Users/test' : undefined }) as never)
+    on('fs.exists', () => ({ value: false }) as never)
+    on('fs.write', (_$, e) => {
+      seen.writes.push({ path: e.path, text: e.text })
+      return { value: undefined } as never
+    })
+    on('command.run', (_$, e) => {
+      seen.commands.push(e.command)
+      return { text: '' } as never
+    })
+    on('prompt.submit', (_$, e) => {
+      seen.submitted.push(e.text)
+      return { text: e.text } as never
+    })
+    // The handoff's own toasts, not the context warnings.
+    on('ui.toast', (_$, e) => {
+      if (e.text.startsWith('Handoff')) seen.toasts.push(e.text)
+      return { value: undefined } as never
+    })
+    return seen
+  }
+
+  async function handoffButton($: Engine): Promise<string[]> {
+    const ui = await $.ui.mount({ plugin: PLUGIN, surface: 'terminal', component: 'AbovePrompt', props: BAND_PROPS })
+    const keys = (await ui.findAll({ type: 'Button' })).map(b => b.key ?? '')
+    await ui.unmount()
+    return keys
+  }
+
+  test('past the critical threshold, while idle, the band offers it; pressed, it saves the summary, clears, and starts over with it', async ($, on) => {
+    const clock = mock.clock(on)
+    engineDraws(on)
+    const seen = engine(on, () => ({ value: { isAnswered: true, text: SUMMARY, usage: {} } }))
+
+    await $.session.measure(CONTEXT(70) as never)
+    expect(await handoffButton($)).toEqual([])
+    await $.session.measure(CONTEXT(85) as never)
+    expect(await handoffButton($)).toEqual(['handoff'])
+    expect(await bandText($)).toContain('context 85%: save a summary, clear, and start over with it')
+
+    const ui = await $.ui.mount({ plugin: PLUGIN, surface: 'terminal', component: 'AbovePrompt', props: BAND_PROPS })
+    await ui.press({ key: 'handoff' })
+    await ui.unmount()
+    for (let i = 0; i < 20 && seen.submitted.length < 1; i++) await clock.advance(1)
+
+    expect(seen.writes).toHaveLength(1)
+    const [kept] = seen.writes
+    expect(kept!.path).toMatch(/^\/Users\/test\/\.claude\/handoffs\/claude-mods\/\d{4}-\d\d-\d\d-\d{4}-handoff\.md$/)
+    expect(kept!.text).toMatch(/^# Handoff: claude-mods, \d{4}-\d\d-\d\d \d\d:\d\d\n\n## Goal\nShip the handoff/)
+    // The file first, then the clear, then the summary as the first prompt.
+    expect(seen.commands).toEqual(['clear'])
+    expect(seen.submitted).toHaveLength(1)
+    expect(seen.submitted[0]).toContain(`also saved at ${kept!.path}`)
+    expect(seen.submitted[0]).toContain(SUMMARY)
+    expect(seen.toasts).toEqual([])
+  })
+
+  test('while a turn runs there is no button; /hud handoff starts one at any fill, and the band says where it stands', async ($, on) => {
+    const clock = mock.clock(on)
+    engineDraws(on)
+    let answer = () => {}
+    const isAnswered = new Promise<void>(resolve => (answer = resolve))
+    const seen = engine(on, () => isAnswered.then(() => ({ value: { isAnswered: true, text: SUMMARY, usage: {} } })))
+    on('turn.start', (_$, e) => ({ turnId: e.turnId }))
+
+    await $.session.measure(CONTEXT(90) as never)
+    await $.turn.start({ text: 'hi', turnId: 't1' })
+    expect(await handoffButton($)).toEqual([])
+
+    expect(await $.command.run({ command: 'hud', args: 'handoff' } as never)).toMatchObject({
+      text: 'Writing a handoff summary; once it is saved, the conversation clears and starts over with it.',
+    })
+    await clock.advance(1)
+    expect(await bandText($)).toContain('⇢ handoff: writing the summary…')
+    expect(await $.command.run({ command: 'hud', args: 'handoff' } as never)).toMatchObject({ text: 'A handoff is already under way.' })
+    answer()
+    for (let i = 0; i < 20 && seen.submitted.length < 1; i++) await clock.advance(1)
+    expect(seen.commands).toEqual(['clear'])
+    expect(seen.submitted[0]).toContain(SUMMARY)
+  })
+
+  test('a summary that does not come leaves the conversation as it was', async ($, on) => {
+    const clock = mock.clock(on)
+    engineDraws(on)
+    const seen = engine(on, () => ({ value: { isAnswered: false, reason: 'nothing-to-fork' } }))
+
+    await $.command.run({ command: 'hud', args: 'handoff' } as never)
+    for (let i = 0; i < 5; i++) await clock.advance(1)
+    expect(seen.writes).toEqual([])
+    expect(seen.commands).toEqual([])
+    expect(seen.submitted).toEqual([])
+    expect(seen.toasts).toEqual(['Handoff stopped: no summary came (nothing-to-fork); the conversation is as it was.'])
+  })
+
+  test('/hud handoff-at sets where the button shows, kept in the store; default goes back to the option', async ($, on) => {
+    mock.clock(on)
+    engineDraws(on)
+    engine(on, () => ({ value: { isAnswered: true, text: SUMMARY, usage: {} } }))
+    const store: Record<string, unknown> = {}
+    on('store.set', (_$, e) => {
+      store[e.key] = e.value
+      return { value: undefined } as never
+    })
+    on('store.delete', (_$, e) => {
+      delete store[e.key]
+      return { value: undefined } as never
+    })
+    const hud = async (args: string) => ((await $.command.run({ command: 'hud', args } as never)) as { text: string }).text
+
+    await $.session.measure(CONTEXT(72) as never)
+    expect(await handoffButton($)).toEqual([])
+    expect(await hud('handoff-at 70')).toBe('The handoff button now shows from 70% context.')
+    expect(store).toEqual({ handoffPercent: 70 })
+    expect(await handoffButton($)).toEqual(['handoff'])
+    expect(await hud('handoff-at')).toContain('shows from 70% context (set by /hud handoff-at)')
+    expect(await hud('')).toContain('handoff button 70% (set with /hud handoff-at)')
+
+    expect(await hud('handoff-at 0')).toBe('"0" is not a whole number from 1 to 100; the handoff button still shows from 70%.')
+    expect(await hud('handoff-at 75.5')).toContain('is not a whole number')
+    expect(store).toEqual({ handoffPercent: 70 })
+
+    expect(await hud('handoff-at default')).toBe('The handoff button now shows from 80% context.')
+    expect(store).toEqual({})
+    expect(await handoffButton($)).toEqual([])
+  })
+
+  test('after a /clear, the first turn reads the project again, so the band names it', async ($, on) => {
+    mock.clock(on)
+    engineDraws(on)
+    engine(on, () => ({ value: { isAnswered: false, reason: 'nothing-to-fork' } }))
+    on('turn.start', (_$, e) => ({ turnId: e.turnId }))
+
+    // A new session state, as after a /clear: no session.start has read the project.
+    expect(await bandText($)).not.toContain('claude-mods')
+    await $.turn.start({ text: 'hi', turnId: 't1' })
+    expect(await bandText($)).toContain('claude-mods')
+  })
+})

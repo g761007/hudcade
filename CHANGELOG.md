@@ -17,6 +17,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   last replay of each project is kept on disk, so it outlives a restart. The
   idle band offers it once such a turn ends.
 
+- One-click handoff: past the critical context threshold the idle band
+  offers a handoff button, and `/hud handoff` runs one at any time. A fork of
+  the conversation writes a summary (goal, done, not done yet, files changed,
+  what to watch out for), saved under `~/.claude/handoffs/<project>/`; the
+  conversation is cleared and starts over with the summary as its first
+  prompt. With no summary, the conversation is left as it was.
+- `handoffPercent` option (80 by default) for when the band offers a
+  handoff, and `/hud handoff-at <percent>` to set it from the prompt, kept
+  across sessions; `/hud handoff-at default` goes back to the option.
+
 ### Changed
 
 - The idle band's prompt-cache countdown turns amber five minutes before
@@ -30,6 +40,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - After a reload of the mod, an idle band counts the cache down again
   instead of waiting for the next turn.
+- After a `/clear`, the band names the project and branch again from the
+  first turn on.
 
 ## [0.3.0] - 2026-11-20
 

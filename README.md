@@ -125,6 +125,16 @@ The pane takes as much room as Claude Code gives one: docked beside a fullscreen
 
 A turn that called no tool leaves the last replay as it was. The last replay of each project is also kept on disk, so it outlives a restart, a `/clear` or the conversation moving to a new session: `/hud replay` opens it there, marked as from an earlier session.
 
+### One-click handoff
+
+Once context reaches `handoffPercent` (80% by default; `/hud handoff-at 70` sets it from the prompt), the idle band offers a `⇢ handoff` button (`h` once the band has the keys, or a click). Pressed, or run as `/hud handoff` at any time:
+
+1. A fork of the conversation writes a handoff summary under five headings: the goal, what is done, what is not done yet, the files changed, and what to watch out for. The fork reads the conversation from the prompt cache and adds nothing to it.
+2. The summary is saved to `~/.claude/handoffs/<project>/<date>-<time>-handoff.md`.
+3. The conversation is cleared, and the summary, with the file's path, is sent as the new conversation's first prompt.
+
+While it runs, the band says which step it is on. If no summary comes, or it cannot be saved, the conversation is left as it was.
+
 ### Telegram notifications
 
 ```
@@ -156,6 +166,7 @@ Everything lives in `/config`, or run `claude plugin configure hudcade`:
 | `spinner` | `true` | The pixel spinner (terminal) |
 | `spinnerScene` | `random` | `random`, or one of `robot`, `coffee`, `garden`, `rocket`, `cat`, `fishing`, `train`, `campfire`, `weather`, `equalizer` |
 | `ctxWarnPercent` / `ctxCriticalPercent` | `60` / `80` | Context thresholds for colors, toasts and the breakdown row |
+| `handoffPercent` | `80` | Context usage from which the band offers a one-click handoff; `/hud handoff-at` sets it over this option |
 | `recap` | `false` | The step recap row: a small model sums up the running turn (billed to your session) |
 | `recapModel` | `haiku` | Model alias or id that writes the step recap |
 | `notify` | `true` | Telegram notifications |
@@ -175,6 +186,8 @@ Commands:
 - `/hud`: what is switched on, where the settings came from, and what the HUD has read, including what the cache countdown counts from: `cache=1h · last main request sent 16:02:11 · expires 17:02:11 (in 42m)`.
 - `/hud agents`: open the agents pane.
 - `/hud replay`: replay the last turn that called tools.
+- `/hud handoff`: save a handoff summary, clear the conversation, and start over with the summary.
+- `/hud handoff-at <percent>`: show the handoff button from this context share (1 to 100), kept across sessions; with no number, say what it is; `default` goes back to the `handoffPercent` option.
 - `/hud test-notify`: send a test Telegram message.
 
 ## How it works
