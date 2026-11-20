@@ -14,6 +14,8 @@ export type ModsConfig = {
   spinnerScene: SceneChoice
   ctxWarnPercent: number
   ctxCriticalPercent: number
+  recap: boolean
+  recapModel: string
   notify: boolean
   notifyMinTurnSeconds: number
   notifyBlocklist: string[]
@@ -29,6 +31,8 @@ export const DEFAULTS: ModsConfig = {
   spinnerScene: 'random',
   ctxWarnPercent: 60,
   ctxCriticalPercent: 80,
+  recap: false,
+  recapModel: 'haiku',
   notify: true,
   notifyMinTurnSeconds: 0,
   notifyBlocklist: [],
@@ -45,6 +49,8 @@ const PROJECT_KEYS = [
   'spinnerScene',
   'ctxWarnPercent',
   'ctxCriticalPercent',
+  'recap',
+  'recapModel',
   'notify',
   'notifyMinTurnSeconds',
   'notifyBlocklist',
@@ -103,6 +109,7 @@ function set(config: ModsConfig, key: string, value: unknown): string | undefine
     case 'hud':
     case 'statusLine':
     case 'spinner':
+    case 'recap':
     case 'notify':
       if (typeof value !== 'boolean') return `"${key}" must be a boolean`
       config[key] = value
@@ -118,6 +125,10 @@ function set(config: ModsConfig, key: string, value: unknown): string | undefine
     case 'spinnerScene':
       if (!SCENE_CHOICES.includes(value as SceneChoice)) return `"spinnerScene" must be one of ${SCENE_CHOICES.join(', ')}`
       config.spinnerScene = value as SceneChoice
+      return
+    case 'recapModel':
+      if (typeof value !== 'string' || !value.trim()) return '"recapModel" must be a model alias or id'
+      config.recapModel = value.trim()
       return
     case 'notifyLanguage':
       if (value !== 'auto' && value !== 'en' && value !== 'zh-TW') return '"notifyLanguage" must be one of auto, en, zh-TW'

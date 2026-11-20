@@ -9,32 +9,37 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, Timer } from 'claude-code'
 
 import type { Hud, SceneName } from '../types'
-import { buildBand, statusLine, type Seg } from '../src/core/band'
+import { agentSummary, buildBand, paneRows, statusLine, type Seg } from '../src/core/band'
 import { createRuntime, parseEnvFile, resolveConfig, type Layer, type Runtime } from '../src/core/config'
 import { basename, clock, modelLabel, parseTzOffset, tokens, toolDetail, toolLabel, truncate, usd } from '../src/core/format'
+import { cleanRecap, recapRequest, type RecapStep } from '../src/core/recap'
 import { SCENE_ROWS, SCENES, modeLabel, modeOf, pickScene, renderScene, type SpinnerMode } from '../src/core/scenes'
 import { turnFacts } from '../src/core/spinner'
 import {
   addDiff,
   addRequestUsage,
   agentResult,
+  agentTurnEnded,
   applyResume,
   applyUsage,
+  cacheRemainingMs,
   completeTurn,
   emptyHud,
   endTool,
   finishAgent,
+  isAgentShown,
   launchAgent,
   linkAgent,
   noteCompaction,
   parseGitStatus,
   patchCounts,
-  pauseAgent,
   reconcileAgents,
+  reportAgent,
   resumeAgent,
   setCacheTtl,
   setCtxTop,
   setAgentModel,
+  setRecap,
   setTeammates,
   setWaiting,
   setWorkers,
@@ -47,7 +52,7 @@ import {
   withDefaults,
   type UsageInput,
 } from '../src/core/hud-model'
-import { buildMessage, resolveLanguage, summarize, type NotifyKind } from '../src/core/telegram'
+import { buildMessage, resolveLanguage, summarize, type NotifyKind, type NotifyLanguage } from '../src/core/telegram'
 
 // The one session value the drawings read: a write redraws the band and the spinner.
 const hudAtom = atom({ plugin: 'hudcade', key: 'hud' } as const, emptyHud(''))
@@ -58,6 +63,17 @@ const GIT_TOOLS = new Set(['Bash', 'Edit', 'Write', 'NotebookEdit'])
 const AGENT_SYNC_MS = 15_000
 const FRAME_MS = 80
 const SPINNER_TEXT_COLUMNS = 36
+const AGENTS_PANE = 'hudcade-agents'
+// While idle, the band redraws this often for the cache countdown and the
+// agent rows that are about to go.
+const IDLE_REDRAW_MS = 15_000
+// An ask the mode gives to no classifier within this time is the person's.
+const ASK_SETTLE_MS = 1_500
+// A permission or failure notice that both a native and a classic event
+// raised is sent once.
+const NOTIFY_DEDUPE_MS = 15_000
+const COMPACTION_DEDUPE_MS = 30_000
+const RECAP_MIN_INTERVAL_MS = 10_000
 
 type NotifyExtra = { durationMs?: number; summary?: string; detail?: string }
 
@@ -89,6 +105,20 @@ let scene: SceneName = 'robot'
 let lastScene: SceneName | undefined
 let spinnerMode: SpinnerMode | undefined
 const spinners = new Map<string, number>() // mounted spinner requestId → scene columns
+let idleTimer: Timer | undefined
+let settingsLanguage: unknown
+// Main-loop calls the mode put to a person: settled at tool.run or the call's end.
+const pendingAsks = new Map<string, { detail: string; isAsked: boolean; timer?: Timer }>()
+const lastNotifyAt: Partial<Record<NotifyKind, number>> = {}
+let lastCompactionAt = Number.NEGATIVE_INFINITY
+// The running turn's step recap.
+let recapTask = ''
+let recapNote = ''
+let recapSteps: RecapStep[] = []
+let recapTimer: Timer | undefined
+let isRecapping = false
+let isRecapDirty = false
+let lastRecapAt = Number.NEGATIVE_INFINITY
 
 // ── Configuration ─────────────────────────────────────────────────────────
 
@@ -178,6 +208,7 @@ async function refreshAgents($: EngineInterface, isThrottled = false): Promise<v
     const agents = await $.agent.list()
     const h = await patch($, h => reconcileAgents(setTeammates(h, agents), agents, now))
     syncTicker($, h.turn.status !== 'idle' || h.agents.some(a => a.status === 'running'))
+    void syncIdleRedraw($)
   } catch {
     // Agent teams off, or the roster unavailable: no teammate rows, and agent
     // rows wait for SubagentStop.
@@ -322,6 +353,121 @@ async function localTime($: EngineInterface): Promise<string> {
   return `${new Date().toISOString().replace('T', ' ').slice(0, 19)} UTC`
 }
 
+// A permission or failure notice heard from both a native and a classic event
+// goes out once.
+async function notifyOnce($: EngineInterface, kind: NotifyKind, extra: NotifyExtra): Promise<void> {
+  const now = await $.clock.now()
+  if (now - (lastNotifyAt[kind] ?? Number.NEGATIVE_INFINITY) < NOTIFY_DEDUPE_MS) return
+  lastNotifyAt[kind] = now
+  notifyLater($, kind, extra)
+}
+
+// ── Waiting for the person ────────────────────────────────────────────────
+
+// The mode put a main-loop call to a person: the band says so and Telegram tells them.
+async function askReachedPerson($: EngineInterface, id: string): Promise<void> {
+  const ask = pendingAsks.get(id)
+  if (!ask || ask.isAsked) return
+  ask.isAsked = true
+  ask.timer = undefined
+  await patch($, h => setWaiting(h, true))
+  await notifyOnce($, 'permission', { detail: ask.detail })
+}
+
+async function settleAsk($: EngineInterface, id: string): Promise<void> {
+  const ask = pendingAsks.get(id)
+  if (!ask) return
+  ask.timer?.cancel()
+  pendingAsks.delete(id)
+  if (ask.isAsked && ![...pendingAsks.values()].some(other => other.isAsked)) await patch($, h => setWaiting(h, false))
+}
+
+function clearAsks(): void {
+  for (const ask of pendingAsks.values()) ask.timer?.cancel()
+  pendingAsks.clear()
+}
+
+// Compactions heard from both session.compact and classic.PostCompact count once.
+async function countCompaction($: EngineInterface): Promise<void> {
+  const now = await $.clock.now()
+  if (now - lastCompactionAt < COMPACTION_DEDUPE_MS) return
+  lastCompactionAt = now
+  await patch($, h => noteCompaction(h))
+}
+
+// Redraws the idle band while it shows something that changes with time: the
+// cache countdown, or agent rows that are about to go.
+async function syncIdleRedraw($: EngineInterface): Promise<void> {
+  const [h, now] = await Promise.all([snapshot($), $.clock.now()])
+  const remaining = cacheRemainingMs(h.cache, now)
+  const isNeeded =
+    runtime.config.hud &&
+    h.turn.status === 'idle' &&
+    ((remaining !== undefined && remaining > 0) || h.agents.some(a => a.status !== 'running' && isAgentShown(a, now)))
+  if (isNeeded && !idleTimer) {
+    idleTimer = $.clock.every(IDLE_REDRAW_MS, () => {
+      $.ui.invalidate('ui.render')
+      void syncIdleRedraw($)
+    })
+  } else if (!isNeeded && idleTimer) {
+    idleTimer.cancel()
+    idleTimer = undefined
+  }
+}
+
+// ── Step recap ────────────────────────────────────────────────────────────
+
+function resetRecap(task: string): void {
+  recapTimer?.cancel()
+  recapTimer = undefined
+  recapTask = task
+  recapNote = ''
+  recapSteps = []
+  isRecapDirty = false
+}
+
+// After a main-loop step: one model call at a time, at most one per
+// RECAP_MIN_INTERVAL_MS, over the steps so far. Started from a timer, so it
+// outlives the step's own dispatch.
+function scheduleRecap($: EngineInterface, now: number): void {
+  if (!runtime.config.recap || !runtime.config.hud) return
+  isRecapDirty = true
+  if (isRecapping || recapTimer) return
+  const wait = Math.max(1, lastRecapAt + RECAP_MIN_INTERVAL_MS - now)
+  recapTimer = $.clock.after(wait, () => {
+    recapTimer = undefined
+    void runRecap($)
+  })
+}
+
+async function runRecap($: EngineInterface): Promise<void> {
+  if (!isRecapDirty || isRecapping) return
+  const hud = await snapshot($)
+  if (hud.turn.status === 'idle') return
+  isRecapDirty = false
+  isRecapping = true
+  const turn = hud.turn.count
+  try {
+    const { system, prompt } = recapRequest({
+      language: resolveLanguage(runtime.config.notifyLanguage, settingsLanguage) as NotifyLanguage,
+      task: recapTask,
+      steps: recapSteps,
+      note: recapNote,
+      runningAgents: hud.agents.filter(a => a.status === 'running').length,
+    })
+    const reply = await $.model.complete({ model: runtime.config.recapModel, system, prompt, maxTokens: 200, timeoutMs: 20_000 })
+    const text = reply.isAnswered ? cleanRecap(reply.text) : ''
+    if (text) await patch($, h => setRecap(h, text, turn))
+    else $.ui.log(`hudcade: recap got no line (${reply.isAnswered ? 'empty' : reply.reason})`, { to: 'debug' })
+  } catch (error) {
+    $.ui.log(`hudcade: recap failed (${error instanceof Error ? error.name : 'error'})`, { to: 'debug' })
+  } finally {
+    isRecapping = false
+    lastRecapAt = await $.clock.now()
+    if (isRecapDirty) scheduleRecap($, lastRecapAt)
+  }
+}
+
 
 export const register: Register = (on, options) => {
   values = options as Record<string, unknown>
@@ -337,8 +483,8 @@ export const register: Register = (on, options) => {
     }
     await $.command.register({
       name: 'hud',
-      description: 'hudcade status; `/hud test-notify` sends a test Telegram message',
-      argumentHint: '[test-notify]',
+      description: 'hudcade status; `/hud agents` opens the agents pane; `/hud test-notify` sends a test Telegram message',
+      argumentHint: '[agents|test-notify]',
     })
     // Each fact is read on its own: one that fails must not blank the others,
     // and its reason shows in /hud.
@@ -362,6 +508,7 @@ export const register: Register = (on, options) => {
     try {
       const settings = (await $.settings.read()) as Record<string, unknown>
       if (typeof settings.effortLevel === 'string') effort = settings.effortLevel
+      settingsLanguage = settings.language
     } catch (error) {
       note('settings.read', error)
     }
@@ -419,15 +566,30 @@ export const register: Register = (on, options) => {
     if (e.args.trim() === 'test-notify') {
       return { text: `hudcade test notification: ${await notify($, 'test', {})}` }
     }
+    if (e.args.trim() === 'agents') {
+      const { isPlaced } = await $.ui.open({ id: AGENTS_PANE, title: 'hudcade · agents' })
+      return { text: isPlaced ? 'Agents pane opened.' : 'The agents pane opens once the window has room for it.' }
+    }
     return { text: statusText(runtime, await snapshot($)) }
   })
 
   // ── Turns ─────────────────────────────────────────────────────────────────
 
+  // A subagent's turn.start (e.agentId) starts its run's clock; only the
+  // main loop's starts a turn of the band.
   on('turn.start', async ($, e, next) => {
     const now = await $.clock.now()
+    if (e.agentId) {
+      const agentId = e.agentId
+      await patch($, h => resumeAgent(h, agentId, now))
+      return next(e)
+    }
     const h = await patch($, h => startTurn(h, now))
     syncTicker($, true)
+    idleTimer?.cancel()
+    idleTimer = undefined
+    clearAsks()
+    resetRecap(e.text)
 
     turnStartedAt = now
     toolsAtStart = h.tools.total
@@ -460,17 +622,21 @@ export const register: Register = (on, options) => {
     }
 
     // Read the request's stream through unchanged; its stop chunk carries the
-    // tokens, cache reads and writes included.
+    // tokens, cache reads and writes included, and the cache lifetime counts
+    // from when the request was sent. Its text is the recap's latest note.
+    const sentAt = e.agentId ? 0 : await $.clock.now()
     const stream = next(e)
     let firstChunkAt: number | undefined
+    let said = ''
     for await (const chunk of stream) {
       if (!e.agentId) {
         firstChunkAt ??= await $.clock.now()
+        if (chunk.kind === 'text') said += chunk.text
         if (chunk.kind === 'stop' && chunk.usage) {
           const usage = chunk.usage
           const streamMs = (await $.clock.now()) - firstChunkAt
           try {
-            await patch($, h => addRequestUsage(h, usage, streamMs))
+            await patch($, h => addRequestUsage(h, usage, streamMs, sentAt))
           } catch {
             // A missed reading only skews the ratio and the speed.
           }
@@ -478,15 +644,20 @@ export const register: Register = (on, options) => {
       }
       yield chunk
     }
+    if (said.trim()) recapNote = said
     return await stream.result
   })
 
   on('turn.complete', async ($, e, next) => {
     if (!e.agentId) {
       const now = await $.clock.now()
-      const h = await patch($, h => completeTurn(h, e.durationMs, now))
+      const h = await patch($, h => completeTurn(h, e.durationMs, now, e.reason))
       syncTicker($, h.agents.some(a => a.status === 'running'))
       stopFrames()
+      clearAsks()
+      recapTimer?.cancel()
+      recapTimer = undefined
+      isRecapDirty = false
       void refreshGit($)
       void refreshAgents($)
       const percent = h.ctx?.percent
@@ -495,15 +666,16 @@ export const register: Register = (on, options) => {
 
       const isLongEnough = e.durationMs >= runtime.config.notifyMinTurnSeconds * 1_000
       if (!e.isAborted && isLongEnough) {
-        notifyLater($, e.reason === 'error' ? 'failure' : 'done', {
-          durationMs: e.durationMs,
-          summary: summarize(e.answer),
-        })
+        const extra = { durationMs: e.durationMs, summary: summarize(e.answer) }
+        if (e.reason === 'error') await notifyOnce($, 'failure', extra)
+        else notifyLater($, 'done', extra)
       }
+      void syncIdleRedraw($)
     } else {
       const now = await $.clock.now()
       const agentId = e.agentId
-      await patch($, h => pauseAgent(h, agentId, now))
+      await patch($, h => agentTurnEnded(h, agentId, now))
+      void syncIdleRedraw($)
     }
     return next(e)
   })
@@ -566,15 +738,27 @@ export const register: Register = (on, options) => {
         return state
       })
       if (GIT_TOOLS.has(e.tool)) void refreshGit($)
+      // A call the person denied ends here, never reaching tool.run.
+      if (pendingAsks.has(id)) await settleAsk($, id)
+      if (!e.agentId) {
+        recapSteps.push({ tool: e.tool, detail: toolDetail(e.tool, input), isError })
+        scheduleRecap($, end)
+      }
     } catch {
       // Bookkeeping never changes what the tool returned.
     }
     return ran
   }).catch(($, e, next) => next(e))
 
-  // The classic.* hooks below are passed over where a managed plugin sits above
-  // this one (cc-plugin-sec-default on Team and Enterprise plans); agent.spawn
-  // and session.end carry what they can of SubagentStart and SessionStart.
+  // ── Native events for what the classic hooks below also report ────────────
+  //
+  // Where a managed plugin sits above this one (cc-plugin-sec-default on Team
+  // and Enterprise plans) every classic.* hook is passed over, so these native
+  // events carry what they can. Elsewhere both arrive: each pair links, ends,
+  // counts and notifies once.
+
+  // The exact link: an agent row belongs to the Agent call the spawn names. A
+  // workflow's agent or a fork no call starts gets a row of its own.
   on('agent.spawn', async ($, e, next) => {
     const spawned = await next(e)
     const agentId = spawned.agentId
@@ -582,13 +766,86 @@ export const register: Register = (on, options) => {
     if (!agentId || e.isTeammate) return spawned
     try {
       const now = await $.clock.now()
-      await patch($, h => spawnAgent(h, { toolUseId: e.tool_use_id, agentId, type: e.subagentType, now }))
+      const isWorkflow = e.workflow !== undefined || (e.fork && !e.tool_use_id)
+      const description = e.description || (e.workflow ? `workflow agent ${e.workflow.agentIndex}` : '')
+      await patch($, h =>
+        spawnAgent(h, {
+          toolUseId: e.tool_use_id,
+          agentId,
+          type: e.subagentType,
+          description,
+          isBackground: e.background,
+          isWorkflow,
+          isResume: e.resume !== undefined,
+          now,
+        }),
+      )
       syncTicker($, true)
       void refreshAgents($)
     } catch {
       // Bookkeeping never changes the spawn.
     }
     return spawned
+  })
+
+  // How an agent's run ended, as its report reaches the parent; the report
+  // itself passes on untouched.
+  on('agent.report', async ($, e, next) => {
+    const reported = await next(e)
+    try {
+      const now = await $.clock.now()
+      const h = await patch($, h => reportAgent(h, e.agentId, e.status, now))
+      syncTicker($, h.turn.status !== 'idle' || h.agents.some(a => a.status === 'running'))
+      void syncIdleRedraw($)
+    } catch {
+      // Bookkeeping never changes the report.
+    }
+    return reported
+  })
+
+  // A compaction of the main conversation that took place (not a precompute
+  // kept for later, nor one a hook skipped).
+  on('session.compact', async ($, e, next) => {
+    const compacted = await next(e)
+    if (!e.agentId && e.trigger !== 'precompute' && compacted.messages !== undefined) {
+      try {
+        await countCompaction($)
+      } catch {
+        // Bookkeeping never changes the compaction.
+      }
+    }
+    return compacted
+  })
+
+  // A main-loop call the mode puts to a person. Auto mode asks its classifier
+  // first (tool.judge): only a call it gives no verdict on reaches the person.
+  on('tool.check', async ($, e, next) => {
+    const verdict = await next(e)
+    const id = e.tool_use_id
+    if (verdict.decision === 'ask' && id && !e.agentId && e.approver === 'person' && !pendingAsks.has(id)) {
+      const input = (e.input ?? {}) as Record<string, unknown>
+      const detail = [toolLabel(e.tool), toolDetail(e.tool, input)].filter(Boolean).join(': ')
+      pendingAsks.set(id, { detail, isAsked: false, timer: $.clock.after(ASK_SETTLE_MS, () => void askReachedPerson($, id)) })
+    }
+    return verdict
+  })
+
+  on('tool.judge', async ($, e, next) => {
+    const ask = pendingAsks.get(e.tool_use_id)
+    ask?.timer?.cancel()
+    if (ask) ask.timer = undefined
+    const verdict = await next(e)
+    if (ask) {
+      if (verdict.decision === 'ask') await askReachedPerson($, e.tool_use_id)
+      else await settleAsk($, e.tool_use_id)
+    }
+    return verdict
+  })
+
+  // An allowed call is about to run: whoever was asked has answered.
+  on('tool.run', async ($, e, next) => {
+    if (e.tool_use_id && pendingAsks.has(e.tool_use_id)) await settleAsk($, e.tool_use_id)
+    return next(e)
   })
 
   on('classic.SubagentStart', async ($, e, next) => {
@@ -603,6 +860,7 @@ export const register: Register = (on, options) => {
     const now = await $.clock.now()
     const h = await patch($, h => (e.agent_id ? finishAgent(h, e.agent_id, now) : h))
     syncTicker($, h.turn.status !== 'idle' || h.agents.some(a => a.status === 'running'))
+    void syncIdleRedraw($)
     return next(e)
   })
 
@@ -635,7 +893,7 @@ export const register: Register = (on, options) => {
   })
 
   on('classic.PostCompact', async ($, e, next) => {
-    await patch($, h => noteCompaction(h))
+    await countCompaction($)
     return next(e)
   })
 
@@ -670,7 +928,7 @@ export const register: Register = (on, options) => {
   on('classic.Notification', async ($, e, next) => {
     if (!e.agent_id && e.notification_type === 'permission_prompt') {
       await patch($, h => setWaiting(h, true))
-      notifyLater($, 'permission', { detail: summarize(e.message, 200) })
+      await notifyOnce($, 'permission', { detail: summarize(e.message, 200) })
     }
     return next(e)
   })
@@ -678,7 +936,7 @@ export const register: Register = (on, options) => {
   on('classic.StopFailure', async ($, e, next) => {
     if (!e.agent_id) {
       const detail = [String(e.error), e.error_details].filter(Boolean).join(' — ')
-      notifyLater($, 'failure', { detail: summarize(detail, 200) })
+      await notifyOnce($, 'failure', { detail: summarize(detail, 200) })
     }
     return next(e)
   })
@@ -706,6 +964,47 @@ export const register: Register = (on, options) => {
           <Box flexDirection="row" justifyContent="space-between">
             <Box flexDirection="row">{texts(row.left)}</Box>
             {row.right.length > 0 && <Box flexDirection="row">{texts(row.right)}</Box>}
+          </Box>
+        ))}
+      </Box>
+    )
+  })
+
+  // Under an Agent call's transcript row, while its agent runs: model, work
+  // time, tools, the tool in hand and its context.
+  on('ui.render', { component: 'ToolUse' }, async ($, e, next) => {
+    if (!runtime.config.hud || e.props.tool !== 'Agent') return next(e)
+    const row = await next(e)
+    const hud = await snapshot($)
+    const agent = hud.agents.find(a => a.toolUseId === e.props.tool_use_id)
+    if (!agent || agent.status !== 'running') return row
+    const now = await $.clock.now()
+    const { Box, Text } = $.ui.resolve(e)
+    return (
+      <Box flexDirection="column">
+        {row}
+        <Text dimColor wrap="truncate">
+          {agentSummary(agent, now)}
+        </Text>
+      </Box>
+    )
+  })
+
+  // `/hud agents`: every agent of the session with its task, and the teammates,
+  // background tasks and scheduled prompts.
+  on('ui.render', { component: 'Pane', requestId: AGENTS_PANE }, async ($, e) => {
+    const hud = await snapshot($)
+    const now = await $.clock.now()
+    const { Box, Text } = $.ui.resolve(e)
+    return (
+      <Box flexDirection="column">
+        {paneRows(hud, now).map(row => (
+          <Box flexDirection="row">
+            {row.map(seg => (
+              <Text color={seg.color} dimColor={seg.dim} bold={seg.bold} wrap="truncate">
+                {seg.text}
+              </Text>
+            ))}
           </Box>
         ))}
       </Box>
@@ -761,7 +1060,7 @@ function statusText(runtime: Runtime, hud: Hud): string {
   const onOff = (flag: boolean) => (flag ? 'on' : 'off')
   const lines = [
     'hudcade status',
-    `modules: hud ${onOff(config.hud)} · status line ${onOff(config.statusLine)} · spinner ${onOff(config.spinner)} (${config.spinnerScene}) · notify ${onOff(config.notify)}`,
+    `modules: hud ${onOff(config.hud)} · status line ${onOff(config.statusLine)} · spinner ${onOff(config.spinner)} (${config.spinnerScene}) · recap ${onOff(config.recap)} (${config.recapModel}) · notify ${onOff(config.notify)}`,
     `context thresholds: warn ${config.ctxWarnPercent}% · critical ${config.ctxCriticalPercent}%`,
     `config sources: ${runtime.sources.join(', ')}`,
     `telegram: ${runtime.telegramSource ? `configured (${runtime.telegramSource})` : 'not configured'} · language ${config.notifyLanguage}`,

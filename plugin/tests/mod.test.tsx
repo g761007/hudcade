@@ -22,6 +22,28 @@ function engineDraws(on: On): void {
   })
 }
 
+// The session facts a Telegram message reads, answered as the engine would.
+function session(on: On): void {
+  on('session.root', () => ({ value: '/work/claude-mods' }))
+  on('session.id', () => ({ value: '11fa1a35-c235-406a' }))
+  on('session.usage', () => ({
+    value: {
+      startedAt: 0,
+      context: { tokens: 90_000, window: 1_000_000, percent: 9 },
+      rateLimits: [{ kind: 'five_hour', percentUsed: 13 }],
+      cost: { usd: 0.43 },
+    },
+  }))
+}
+
+// The whole band as one string: every Text segment of every row, in order.
+async function bandText($: Engine, surface: 'terminal' | 'desktop' = 'terminal'): Promise<string> {
+  const ui = await $.ui.mount({ plugin: PLUGIN, surface, component: 'AbovePrompt', props: BAND_PROPS })
+  const texts = await ui.findAll({ type: 'Text' })
+  await ui.unmount()
+  return texts.map(t => t.text).join('')
+}
+
 describe('band', () => {
   test('draws model, cost and progress on terminal and desktop', async ($, on) => {
     mock.clock(on)
@@ -262,20 +284,6 @@ describe('spinner', () => {
 describe('notify', () => {
   const OPTIONS = { options: { telegramBotToken: 'BOT-TOKEN', telegramChatId: '42', notifyLanguage: 'zh-TW' } }
 
-  // The session facts a message reads, answered as the engine would.
-  function session(on: On): void {
-    on('session.root', () => ({ value: '/work/claude-mods' }))
-    on('session.id', () => ({ value: '11fa1a35-c235-406a' }))
-    on('session.usage', () => ({
-      value: {
-        startedAt: 0,
-        context: { tokens: 90_000, window: 1_000_000, percent: 9 },
-        rateLimits: [{ kind: 'five_hour', percentUsed: 13 }],
-        cost: { usd: 0.43 },
-      },
-    }))
-  }
-
   test('a completed turn sends one Telegram message with the old fields', OPTIONS, async ($, on) => {
     const clock = mock.clock(on)
     session(on)
@@ -337,5 +345,280 @@ describe('notify', () => {
     await $.turn.complete({ answer: 'x', durationMs: 90_000, isAborted: true, turnId: 'b', reason: 'aborted' } as never)
     for (let i = 0; i < 5; i++) await clock.advance(10)
     expect(calls).toBe(0)
+  })
+})
+
+// Where a managed plugin passes every classic.* hook over, the native events
+// below are all the mod hears; the tests raise no classic agent event.
+describe('agents without classic hooks', () => {
+  const SPAWN = { prompt: 'p', provider: { plugin: 'engine', tier: 'core' }, parentModel: 'claude-opus-5-5', fork: false }
+
+  // An Agent call held open, as a foreground agent's call is while it runs.
+  function holdsAgentCall(on: On, agentId: string): { isReached: Promise<void>; release: () => void } {
+    let reached = () => {}
+    let release = () => {}
+    const isReached = new Promise<void>(resolve => (reached = resolve))
+    const isReleased = new Promise<void>(resolve => (release = resolve))
+    on('tool.call', async () => {
+      reached()
+      await isReleased
+      return { result: { status: 'completed', agentId }, text: '' } as never
+    })
+    return { isReached, release }
+  }
+
+  test('a subagent’s turn.start starts no turn of the band', async ($, on) => {
+    mock.clock(on)
+    engineDraws(on)
+    on('turn.start', (_$, e) => ({ turnId: e.turnId }))
+
+    await $.turn.start({ text: 'hi', turnId: 't1' })
+    await $.turn.start({ text: 'p', turnId: 'r1', agentId: 'ag1' })
+    const band = await bandText($)
+    expect(band).toContain('turn 1')
+    expect(band).not.toContain('turn 2')
+  })
+
+  test('a workflow’s agent gets a row of its own and ends at its turn.complete', async ($, on) => {
+    mock.clock(on)
+    engineDraws(on)
+    on('agent.spawn', (_$, e) => ({ model: 'claude-haiku-5-5', agentId: 'workflow' in e && e.workflow ? 'wf1' : 'ex1' }) as never)
+    on('turn.complete', (_$, e) => ({ text: e.answer }) as never)
+    const call = holdsAgentCall(on, 'ex1')
+
+    const running = $.tool.call({ tool: 'Agent', tool_use_id: 'tuA', description: 'explore auth', prompt: 'p', subagent_type: 'Explore' } as never)
+    await call.isReached
+    await $.agent.spawn({ ...SPAWN, tool_use_id: 'wf-call', description: 'review step', subagentType: 'general-purpose', background: true, workflow: { runId: 'wf_1', agentIndex: 1 } } as never)
+    await $.agent.spawn({ ...SPAWN, tool_use_id: 'tuA', description: 'explore auth', subagentType: 'Explore', background: false } as never)
+    await $.turn.complete({ answer: '', durationMs: 5_000, isAborted: false, turnId: 'w', reason: 'answer', agentId: 'wf1' } as never)
+
+    const band = await bandText($)
+    expect(band).toContain('✓ general-purpose')
+    expect(band).toContain('review step')
+    expect(band).toMatch(/[◐◓◑◒] Explore/)
+    expect(band).toContain('explore auth')
+    call.release()
+    await running
+  })
+
+  test('an agent’s report says how its run ended, and passes on untouched', async ($, on) => {
+    mock.clock(on)
+    engineDraws(on)
+    on('agent.spawn', () => ({ model: 'claude-haiku-5-5', agentId: 'bg1' }) as never)
+    on('agent.report', (_$, e) => ({ text: e.text }) as never)
+
+    await $.agent.spawn({ ...SPAWN, tool_use_id: '', description: 'scan', subagentType: 'Plan', background: true } as never)
+    const reported = await $.agent.report({ agentId: 'bg1', subagentType: 'Plan', provider: SPAWN.provider, status: 'stopped', text: 'partial' } as never)
+    expect(reported.text).toBe('partial')
+    expect(await bandText($)).toContain('⏹ Plan')
+  })
+
+  test('a running agent’s call row gets a line of its live state; other rows are left alone', async ($, on) => {
+    mock.clock(on)
+    on('ui.render', ($, e) => {
+      const { Text } = $.ui.resolve(e)
+      return <Text>ROW</Text>
+    })
+    on('agent.spawn', () => ({ model: 'claude-haiku-5-5', agentId: 'ex1' }) as never)
+    const call = holdsAgentCall(on, 'ex1')
+    const row = (tool: string) =>
+      $.ui.mount({
+        plugin: PLUGIN,
+        surface: 'terminal',
+        component: 'ToolUse',
+        requestId: 'tuA',
+        props: { tool_use_id: 'tuA', tool, input: {}, isRunning: true, isErrored: false, isInterrupted: false },
+      } as never)
+
+    const running = $.tool.call({ tool: 'Agent', tool_use_id: 'tuA', description: 'explore auth', prompt: 'p', subagent_type: 'Explore' } as never)
+    await call.isReached
+    await $.agent.spawn({ ...SPAWN, tool_use_id: 'tuA', description: 'explore auth', subagentType: 'Explore', background: false } as never)
+
+    const agentRow = await row('Agent')
+    expect(await agentRow.find({ type: 'Text', text: 'ROW' })).toBeDefined()
+    expect((await agentRow.find({ type: 'Text', text: /↳/ }))?.text).toMatch(/^ {2}↳ [◐◓◑◒] Explore · 0:00 · 0 tools$/)
+    await agentRow.unmount()
+    const bashRow = await row('Bash')
+    expect((await bashRow.findAll({ type: 'Text' })).map(t => t.text)).toEqual(['ROW'])
+    await bashRow.unmount()
+    call.release()
+    await running
+  })
+
+  test('/hud agents opens the agents pane, which lists each agent with its task', async ($, on) => {
+    mock.clock(on)
+    const opened: string[] = []
+    on('ui.open', (_$, e) => {
+      opened.push(e.id)
+      return { value: { isPlaced: true } } as never
+    })
+    on('agent.spawn', () => ({ model: 'claude-haiku-5-5', agentId: 'ag1' }) as never)
+
+    await $.agent.spawn({ ...SPAWN, tool_use_id: '', description: 'scan the repo', subagentType: 'Explore', background: true } as never)
+    const answer = await $.command.run({ command: 'hud', args: 'agents' } as never)
+    expect(answer).toMatchObject({ text: 'Agents pane opened.' })
+    expect(opened).toEqual(['hudcade-agents'])
+    const ui = await $.ui.mount({
+      plugin: PLUGIN,
+      surface: 'terminal',
+      component: 'Pane',
+      requestId: 'hudcade-agents',
+      props: { title: 'hudcade · agents', isFocused: false, bodyColumns: 80, placement: 'dock', scroll: { offset: 0, bodyRows: 20 }, view: {} },
+    } as never)
+    expect(await ui.find({ type: 'Text', text: '   scan the repo' })).toBeDefined()
+    await ui.unmount()
+  })
+})
+
+describe('waiting for the person without classic hooks', () => {
+  const OPTIONS = { options: { telegramBotToken: 'T', telegramChatId: '1', notifyLanguage: 'en' } }
+  const CHECK = { tool: 'Bash', input: { command: 'git push', description: 'Push the branch' }, tool_use_id: 'tu1', approver: 'person' }
+
+  function telegram(on: On): string[] {
+    const sent: string[] = []
+    on('http.fetch', (_$, e) => {
+      sent.push((JSON.parse(String(e.init?.body ?? '{}')) as { text: string }).text)
+      return { value: { status: 200, ok: true, headers: {}, text: '' } }
+    })
+    on('process.run', () => ({ value: { exitCode: 0, stdout: 'now\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
+    return sent
+  }
+
+  test('an ask the mode puts to the person shows as waiting and notifies once, though Notification follows', OPTIONS, async ($, on) => {
+    const clock = mock.clock(on)
+    engineDraws(on)
+    session(on)
+    const sent = telegram(on)
+    on('turn.start', (_$, e) => ({ turnId: e.turnId }))
+    on('tool.check', () => ({ decision: 'ask' }) as never)
+    on('tool.run', () => ({ result: { stdout: '', stderr: '' } }) as never)
+    on('classic.Notification', () => ({}) as never)
+
+    await $.turn.start({ text: 'push it', turnId: 't1' })
+    await $.tool.check(CHECK as never)
+    await clock.advance(1_000)
+    expect(await bandText($)).not.toContain('waiting for you')
+    await clock.advance(600)
+    expect(await bandText($)).toContain('waiting for you')
+    for (let i = 0; i < 20 && sent.length === 0; i++) await clock.advance(10)
+    await $.classic.Notification({ message: 'Claude needs your permission to use Bash', notification_type: 'permission_prompt' } as never)
+    for (let i = 0; i < 20; i++) await clock.advance(10)
+    expect(sent).toHaveLength(1)
+    expect(sent[0]).toContain('needs your approval')
+    expect(sent[0]).toContain('Bash: Push the branch')
+
+    await $.tool.run({ tool: 'Bash', command: 'git push', tool_use_id: 'tu1' } as never)
+    const band = await bandText($)
+    expect(band).toContain('working')
+    expect(band).not.toContain('waiting for you')
+  })
+
+  test('in auto mode, a call the classifier settles reaches nobody', OPTIONS, async ($, on) => {
+    const clock = mock.clock(on)
+    engineDraws(on)
+    session(on)
+    const sent = telegram(on)
+    on('turn.start', (_$, e) => ({ turnId: e.turnId }))
+    on('tool.check', () => ({ decision: 'ask' }) as never)
+    on('tool.judge', () => ({ decision: 'allow' }) as never)
+
+    await $.turn.start({ text: 'push it', turnId: 't1' })
+    await $.tool.check(CHECK as never)
+    await $.tool.judge(CHECK as never)
+    await clock.advance(3_000)
+    expect(await bandText($)).not.toContain('waiting for you')
+    expect(sent).toEqual([])
+  })
+})
+
+describe('compactions without classic hooks', () => {
+  test('a compaction counts once, heard natively and classically; a skipped one counts none', async ($, on) => {
+    mock.clock(on)
+    engineDraws(on)
+    let isSkipped = true
+    const summary = { role: 'user', text: 'Summary of the conversation so far.', toolUses: [] }
+    on('session.compact', () => (isSkipped ? { skip: 'not now' } : { messages: [summary] }) as never)
+    on('classic.PostCompact', () => ({}) as never)
+
+    await $.session.compact({ messages: [summary] } as never)
+    expect(await bandText($)).not.toContain('⟲')
+    isSkipped = false
+    await $.session.compact({ messages: [summary] } as never)
+    await $.classic.PostCompact({ trigger: 'auto', compact_summary: 's' } as never)
+    expect(await bandText($)).toContain('⟲1')
+  })
+})
+
+describe('prompt cache countdown', () => {
+  test('after a turn, the band counts down the cache lifetime the last request renewed', async ($, on) => {
+    const clock = mock.clock(on)
+    engineDraws(on)
+    const usage = { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 900, cache_creation_input_tokens: 100, ephemeral_5m_input_tokens: 100, ephemeral_1h_input_tokens: 0 }
+    on('turn.start', (_$, e) => ({ turnId: e.turnId }))
+    on('turn.step', async function* (_$, e) {
+      yield { kind: 'stop', stopReason: 'end_turn', usage } as never
+      return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn', usage } as never
+    })
+    on('turn.complete', (_$, e) => ({ text: e.answer }) as never)
+
+    await $.turn.start({ text: 'hi', turnId: 't1' })
+    for await (const _chunk of $.turn.step({ turnId: 't1', index: 0, model: 'claude-opus-5-5', messageCount: 1 })) {
+      // The request's one chunk carries its usage.
+    }
+    await $.turn.complete({ answer: 'ok', durationMs: 1_000, isAborted: false, turnId: 't1', reason: 'answer' } as never)
+    expect(await bandText($)).toContain('⏳')
+    await clock.advance(300_000)
+    expect(await bandText($)).toContain('cache cold')
+  })
+})
+
+describe('step recap', () => {
+  function model(on: On, reply: string): { prompt: string; model: string }[] {
+    const calls: { prompt: string; model: string }[] = []
+    on('model.complete', (_$, e) => {
+      calls.push({ prompt: e.prompt, model: e.model })
+      return { value: { isAnswered: true, text: reply, usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } } as never
+    })
+    return calls
+  }
+
+  function works(on: On): void {
+    on('turn.start', (_$, e) => ({ turnId: e.turnId }))
+    on('tool.call', () => ({ result: { stdout: '', stderr: '' }, text: '' }) as never)
+  }
+
+  test('after a step, a small model sums up the turn in the band, at most once per ten seconds', { options: { recap: true } }, async ($, on) => {
+    const clock = mock.clock(on)
+    engineDraws(on)
+    works(on)
+    const calls = model(on, '進度：正在跑測試')
+
+    await $.turn.start({ text: '修好 agent 列', turnId: 't1' })
+    await $.tool.call({ tool: 'Bash', command: 'npm test', description: 'Run tests' } as never)
+    for (let i = 0; i < 10; i++) await clock.advance(10)
+    expect(calls).toHaveLength(1)
+    expect(calls[0]!.model).toBe('haiku')
+    expect(calls[0]!.prompt).toContain('Task: 修好 agent 列')
+    expect(calls[0]!.prompt).toContain('1. Bash: Run tests')
+    expect(await bandText($)).toContain('↳ 正在跑測試')
+
+    await $.tool.call({ tool: 'Read', file_path: '/work/band.ts' } as never)
+    await clock.advance(5_000)
+    expect(calls).toHaveLength(1)
+    await clock.advance(5_200)
+    expect(calls).toHaveLength(2)
+    expect(calls[1]!.prompt).toContain('2. Read: band.ts')
+  })
+
+  test('off by default: no model is called', async ($, on) => {
+    const clock = mock.clock(on)
+    engineDraws(on)
+    works(on)
+    const calls = model(on, 'x')
+
+    await $.turn.start({ text: 'hi', turnId: 't1' })
+    await $.tool.call({ tool: 'Bash', command: 'ls' } as never)
+    await clock.advance(20_000)
+    expect(calls).toEqual([])
   })
 })
