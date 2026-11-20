@@ -5,6 +5,14 @@ All notable changes to hudcade are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- The band counts the hourglass of the cache countdown (`⏳`), and the other
+  emoji Unicode draws two columns wide, as two columns, so the rest of the
+  row lines up as the terminal draws it.
+
 ## [0.4.0] - 2026-11-20
 
 ### Added

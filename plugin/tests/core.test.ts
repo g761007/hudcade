@@ -397,6 +397,13 @@ describe('band', () => {
     expect(capacity(75, 2 * HOUR)).toContain('75% 2h00m →full in 1h00m')
   })
 
+  test('the hourglass and its Unicode-wide neighbours take two columns, as the terminal draws them', () => {
+    expect(displayWidth(' ⏳42m')).toBe(6)
+    for (const ch of ['⌚', '⌛', '⏩', '⏪', '⏫', '⏬', '⏰', '⏳']) expect(displayWidth(ch)).toBe(2)
+    // The band's other marks stay narrow.
+    for (const ch of ['⏺', '⏹', '▶', '✓', '✗', '⤷', '◆', '●', '○', '⎇', '⟲']) expect(displayWidth(ch)).toBe(1)
+  })
+
   test('every row fits the width, dropping the least important parts first', () => {
     for (const columns of [24, 40, 60, 100, 160]) {
       const rows = buildBand(busyHud(), 60_000, columns, OPTIONS)

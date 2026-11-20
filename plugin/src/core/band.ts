@@ -473,6 +473,12 @@ export function cutToWidth(text: string, max: number): string {
 function isWide(cp: number): boolean {
   return (
     (cp >= 0x1100 && cp <= 0x115f) ||
+    // The emoji of Miscellaneous Technical that Unicode makes wide: ⌚⌛ ⏩–⏬ ⏰ ⏳.
+    cp === 0x231a ||
+    cp === 0x231b ||
+    (cp >= 0x23e9 && cp <= 0x23ec) ||
+    cp === 0x23f0 ||
+    cp === 0x23f3 ||
     (cp >= 0x2e80 && cp <= 0xa4cf) ||
     (cp >= 0xac00 && cp <= 0xd7a3) ||
     (cp >= 0xf900 && cp <= 0xfaff) ||
