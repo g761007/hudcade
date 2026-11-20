@@ -5,6 +5,41 @@ All notable changes to hudcade are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Subagent rows on the HUD band, on Team and Enterprise plans where
+  Claude Code passes every classic hook over:
+  - A workflow's agent or a fork no longer takes over the row of an Agent
+    call still starting, and ends when its run does instead of spinning on.
+  - A subagent's turn no longer counts as a new turn of the band, restarts
+    its clock or picks a new spinner scene (Claude Code 2.1.329 raises
+    `turn.start` for subagents too).
+  - A finished row now goes a minute after it ended even while you are idle,
+    not at the next prompt.
+  - An agent taken up again by a message runs again on its row.
+  - A teammate's tool calls no longer add an agent row that never ends.
+- Where both classic and native events arrive, a guess from `SubagentStart`
+  now gives way to the exact link from `agent.spawn`, and permission and
+  failure messages and compactions count once.
+
+### Added
+
+- Native fallbacks for classic hooks: `agent.report` ends an agent's row with
+  how its run ended (✓, ✗, or ⏹ for stopped); `session.compact` counts
+  compactions; the prompt-cache lifetime comes from each response's usage;
+  a permission prompt is inferred from `tool.check`, so the band shows
+  "waiting for you" and Telegram is told.
+- Step recap (opt-in `recap`, `recapModel`): a small model sums up the
+  running turn in one line of the band, at most once every 10 seconds.
+- While idle, the band counts down how long the prompt cache still holds the
+  conversation, then says it is cold.
+- Agent rows show their context share and a sparkline of their tokens; a dim
+  line under each running Agent call in the transcript shows its live state;
+  `/hud agents` opens a pane with every agent and its task.
+- The idle band says when the last turn was interrupted or failed.
+
 ## [0.1.2] - 2026-10-19
 
 ### Fixed

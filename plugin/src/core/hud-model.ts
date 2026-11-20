@@ -1,9 +1,11 @@
 // Pure state transitions of the HUD snapshot. Hooks feed events in through
 // `update($, hud, fn)`; nothing here touches `$`, so every rule is testable.
 
-import type { AgentRun, BackgroundTask, CacheStats, Cron, CtxSlice, Hud, TaskItem, Teammate, ToolRun } from '../../types'
+import type { AgentRun, BackgroundTask, CacheStats, Cron, CtxSlice, Hud, TaskItem, Teammate, ToolRun, TurnState } from '../../types'
 
-const DONE_AGENT_TTL_MS = 60_000
+export const DONE_AGENT_TTL_MS = 60_000
+const TTL_MS = { '5m': 300_000, '1h': 3_600_000 } as const
+const MAX_AGENT_SAMPLES = 8
 const AGENT_LIST_GRACE_MS = 10_000
 const MAX_RUNNING_TOOLS = 50
 
@@ -62,12 +64,17 @@ export type RequestUsage = {
   output_tokens?: number
   cache_read_input_tokens: number
   cache_creation_input_tokens: number
+  ephemeral_5m_input_tokens?: number
+  ephemeral_1h_input_tokens?: number
 }
 
 // One main-thread model request: the session's prompt-cache totals, the
-// turn's tokens, and the request's output speed when its duration is known.
-export function addRequestUsage(h: Hud, usage: RequestUsage, streamMs?: number): Hud {
+// turn's tokens, the request's output speed when its duration is known, and
+// the cache lifetime it renewed from `sentAt`: the lifetime its writes named,
+// else the one the cache already had (a read renews what was written).
+export function addRequestUsage(h: Hud, usage: RequestUsage, streamMs?: number, sentAt?: number): Hud {
   const prev = h.cache ?? { read: 0, written: 0, uncached: 0, requests: 0 }
+  const ttl = (usage.ephemeral_1h_input_tokens ?? 0) > 0 ? '1h' : (usage.ephemeral_5m_input_tokens ?? 0) > 0 ? '5m' : prev.ttl
   const read = usage.cache_read_input_tokens
   const total = usage.input_tokens + read + usage.cache_creation_input_tokens
   const output = usage.output_tokens ?? 0
@@ -83,6 +90,8 @@ export function addRequestUsage(h: Hud, usage: RequestUsage, streamMs?: number):
       requests: prev.requests + 1,
       lastHitPercent: total > 0 ? (read / total) * 100 : prev.lastHitPercent,
       isCold: false,
+      ttl,
+      lastRequestAt: sentAt ?? prev.lastRequestAt,
     },
     turnTokens: { input: turn.input + total, output: turn.output + output },
     tokensPerSecond: isTimed ? output / (streamMs / 1000) : h.tokensPerSecond,
@@ -147,6 +156,13 @@ export function setCacheTtl(h: Hud, ttl: '5m' | '1h'): Hud {
   return { ...h, cache: { ...(h.cache ?? { read: 0, written: 0, uncached: 0, requests: 0 }), ttl } }
 }
 
+// How long the prompt cache holds what the last request renewed; undefined
+// while no lifetime is known, 0 or less once it has run out.
+export function cacheRemainingMs(cache: CacheStats | undefined, now: number): number | undefined {
+  if (!cache?.ttl || cache.lastRequestAt === undefined) return undefined
+  return cache.lastRequestAt + TTL_MS[cache.ttl] - now
+}
+
 // Share of the session's input tokens served from the prompt cache.
 export function cacheHitPercent(cache: CacheStats | undefined): number | undefined {
   if (!cache) return undefined
@@ -181,13 +197,14 @@ export function startTurn(h: Hud, now: number): Hud {
     },
     turnTokens: { input: 0, output: 0 },
     agents: pruneAgents(h.agents, now),
+    recap: undefined,
   }
 }
 
-export function completeTurn(h: Hud, durationMs: number, now: number): Hud {
+export function completeTurn(h: Hud, durationMs: number, now: number, outcome?: TurnState['outcome']): Hud {
   return {
     ...h,
-    turn: { ...h.turn, status: 'idle', startedAt: h.turn.startedAt ?? now - durationMs, endedAt: now, lastDurationMs: durationMs },
+    turn: { ...h.turn, status: 'idle', startedAt: h.turn.startedAt ?? now - durationMs, endedAt: now, lastDurationMs: durationMs, outcome },
     // A main-loop tool still listed when the turn ends was interrupted.
     tools: { ...h.tools, running: h.tools.running.filter(t => t.agentId && isAgentRunning(h, t.agentId)) },
     agents: pruneAgents(h.agents, now),
@@ -199,12 +216,12 @@ export function setWaiting(h: Hud, isWaiting: boolean): Hud {
   return { ...h, turn: { ...h.turn, status: isWaiting ? 'waiting' : 'working' } }
 }
 
+// A call in an agent's loop counts on that agent's row. One no row stands for
+// (a teammate's, listed as a mate) counts on none.
 export function startTool(h: Hud, run: ToolRun): Hud {
   let agents = h.agents
   if (run.agentId) {
-    agents = ensureAgent(agents, run.agentId, run.startedAt).map(a =>
-      a.agentId === run.agentId ? { ...a, tools: a.tools + 1, currentTool: run.tool } : a,
-    )
+    agents = agents.map(a => (a.agentId === run.agentId ? { ...a, tools: a.tools + 1, currentTool: run.tool } : a))
   }
   const running = [...h.tools.running, run].slice(-MAX_RUNNING_TOOLS)
   return {
@@ -257,52 +274,107 @@ export function launchAgent(h: Hud, launch: AgentLaunch): Hud {
   return { ...h, agents: [...pruneAgents(h.agents, launch.now), run] }
 }
 
-// SubagentStart names the loop's id: attach it to the oldest launched agent of
-// that type still without one, or list the agent on its own.
+// SubagentStart names the loop's id but not its Agent call: attach it, as a
+// guess, to the oldest launched agent of that type still without one, or
+// list the agent on its own. agent.spawn and the call's result correct it.
 export function linkAgent(h: Hud, agentId: string, agentType: string, now: number): Hud {
   if (h.agents.some(a => a.agentId === agentId)) return h
   const index = h.agents.findIndex(a => !a.agentId && a.status === 'running' && a.type === agentType)
-  const fallback = index >= 0 ? index : h.agents.findIndex(a => !a.agentId && a.status === 'running')
-  if (fallback < 0) return { ...h, agents: ensureAgent(h.agents, agentId, now, agentType) }
-  return { ...h, agents: h.agents.map((a, i) => (i === fallback ? { ...a, agentId } : a)) }
+  if (index < 0) return { ...h, agents: [...h.agents, ownRow({ agentId, type: agentType, now }, 'guess')] }
+  return { ...h, agents: h.agents.map((a, i) => (i === index ? { ...a, agentId, link: 'guess' } : a)) }
+}
+
+export type AgentSpawn = {
+  toolUseId: string
+  agentId: string
+  type: string
+  description?: string
+  isBackground?: boolean
+  // A workflow's agent() or a fork no tool call starts: no launch row stands for it.
+  isWorkflow?: boolean
+  // A finished agent taken up again (SendMessage), under the same id.
+  isResume?: boolean
+  now: number
 }
 
 // agent.spawn names the Agent call the loop belongs to: attach its id to that
-// launch exactly; a spawn no launch stands for is linked as SubagentStart does.
-export function spawnAgent(h: Hud, spawn: { toolUseId: string; agentId: string; type: string; now: number }): Hud {
-  if (h.agents.some(a => a.agentId === spawn.agentId)) return h
-  const index = h.agents.findIndex(a => a.toolUseId === spawn.toolUseId && !a.agentId)
-  if (index < 0) return linkAgent(h, spawn.agentId, spawn.type, spawn.now)
-  return { ...h, agents: h.agents.map((a, i) => (i === index ? { ...a, agentId: spawn.agentId } : a)) }
+// launch exactly. A spawn no launch stands for (a workflow's agent, a fork)
+// gets a row of its own and never takes another's. Where a SubagentStart
+// guessed first, the guess gives way; an exact link stands.
+export function spawnAgent(h: Hud, spawn: AgentSpawn): Hud {
+  const holder = h.agents.findIndex(a => a.agentId === spawn.agentId)
+  if (holder >= 0 && spawn.isResume) {
+    return { ...h, agents: h.agents.map((a, i) => (i === holder ? reopen(a, spawn.now) : a)) }
+  }
+  if (holder >= 0 && h.agents[holder]!.link === 'exact') return h
+
+  const launch =
+    spawn.isWorkflow || !spawn.toolUseId ? -1 : h.agents.findIndex(a => a.toolUseId === spawn.toolUseId && !a.agentId)
+  if (launch >= 0) return { ...h, agents: claim(h.agents, launch, spawn.agentId) }
+
+  if (holder >= 0) {
+    const row = h.agents[holder]!
+    if (row.toolUseId !== undefined && row.toolUseId === spawn.toolUseId && !spawn.isWorkflow) {
+      return { ...h, agents: h.agents.map((a, i) => (i === holder ? { ...a, link: 'exact' } : a)) }
+    }
+    // A guess put the id on a row that is not this agent's: free that row and
+    // list the agent with what the spawn says of it.
+    const freed = row.toolUseId !== undefined ? [{ ...row, agentId: undefined, link: undefined, tools: 0, currentTool: undefined }] : []
+    const own = { ...ownRow(spawn, 'exact'), tools: row.tools, currentTool: row.currentTool }
+    return { ...h, agents: h.agents.flatMap((a, i) => (i === holder ? [...freed, own] : [a])) }
+  }
+  return { ...h, agents: [...pruneAgents(h.agents, spawn.now), ownRow(spawn, 'exact')] }
 }
 
 // The Agent tool's result: a foreground agent is finished; a background one
-// only reports its id.
+// only reports its id. The id is the call's own, whichever row held it.
 export function agentResult(
   h: Hud,
   toolUseId: string,
   result: { agentId?: string; model?: string; isLaunchOnly: boolean; isError: boolean },
   now: number,
 ): Hud {
+  const index = h.agents.findIndex(a => a.toolUseId === toolUseId)
+  if (index < 0) return h
+  const agents = result.agentId && h.agents[index]!.agentId !== result.agentId ? claim(h.agents, index, result.agentId) : h.agents
   return {
     ...h,
-    agents: h.agents.map(a => {
+    agents: agents.map(a => {
       if (a.toolUseId !== toolUseId) return a
-      const linked = { ...a, agentId: a.agentId ?? result.agentId, model: result.model ?? a.model }
+      const linked = { ...a, model: result.model ?? a.model }
       if (result.isLaunchOnly && !result.isError) return linked
-      return { ...stopWork(linked, now), status: result.isError ? 'failed' : 'done', endedAt: now, currentTool: undefined }
+      return endRun(linked, result.isError ? 'failed' : 'done', now)
     }),
   }
 }
 
+// SubagentStop, or the end of a run nothing else reports.
 export function finishAgent(h: Hud, agentId: string, now: number): Hud {
   return {
     ...h,
-    agents: h.agents.map(a =>
-      a.agentId === agentId && a.status === 'running' ? { ...stopWork(a, now), status: 'done', endedAt: now, currentTool: undefined } : a,
-    ),
+    agents: h.agents.map(a => (a.agentId === agentId && a.status === 'running' ? endRun(a, 'done', now) : a)),
     tools: { ...h.tools, running: h.tools.running.filter(t => t.agentId !== agentId) },
   }
+}
+
+// agent.report says how a run ended, more exactly than the roster or a
+// SubagentStop: it ends a running row, and corrects the status of one they
+// ended first.
+export function reportAgent(h: Hud, agentId: string, report: 'completed' | 'failed' | 'stopped', now: number): Hud {
+  const status = report === 'completed' ? 'done' : report
+  if (!h.agents.some(a => a.agentId === agentId && a.status !== status)) return h
+  return {
+    ...h,
+    agents: h.agents.map(a => (a.agentId !== agentId ? a : a.status === 'running' ? endRun(a, status, now) : { ...a, status })),
+    tools: { ...h.tools, running: h.tools.running.filter(t => t.agentId !== agentId) },
+  }
+}
+
+// An agent's turn.complete: the run of a workflow's agent ends there; any
+// other agent may take on more work, so its clock only stops.
+export function agentTurnEnded(h: Hud, agentId: string, now: number): Hud {
+  const isWorkflow = h.agents.some(a => a.agentId === agentId && a.isWorkflow)
+  return isWorkflow ? finishAgent(h, agentId, now) : pauseAgent(h, agentId, now)
 }
 
 // An agent's clock counts the time it works, not how long its row is listed:
@@ -316,7 +388,7 @@ export function pauseAgent(h: Hud, agentId: string, now: number): Hud {
   return { ...h, agents: h.agents.map(a => (a.agentId === agentId ? stopWork(a, now) : a)) }
 }
 
-// A subagent's run raises no turn.start: its first request restarts the clock.
+// An agent's turn.start or first request restarts its clock.
 export function resumeAgent(h: Hud, agentId: string, now: number): Hud {
   return {
     ...h,
@@ -330,23 +402,88 @@ function stopWork(a: AgentRun, now: number): AgentRun {
   return a.workingSince === undefined ? a : { ...a, workedMs: agentWorkedMs(a, now), workingSince: undefined }
 }
 
+function endRun(a: AgentRun, status: AgentRun['status'], now: number): AgentRun {
+  return { ...stopWork(a, now), status, endedAt: now, currentTool: undefined }
+}
+
+function reopen(a: AgentRun, now: number): AgentRun {
+  if (a.status === 'running') return a
+  return { ...a, status: 'running', endedAt: undefined, workingSince: now, currentTool: undefined }
+}
+
+function ownRow(spawn: Pick<AgentSpawn, 'agentId' | 'type' | 'description' | 'isBackground' | 'isWorkflow' | 'now'>, link: AgentRun['link']): AgentRun {
+  return {
+    key: `ag:${spawn.agentId}`,
+    agentId: spawn.agentId,
+    link,
+    ...(spawn.isWorkflow ? { isWorkflow: true } : {}),
+    type: spawn.type,
+    description: spawn.description ?? '',
+    isBackground: spawn.isBackground ?? false,
+    startedAt: spawn.now,
+    workedMs: 0,
+    workingSince: spawn.now,
+    tools: 0,
+    status: 'running',
+  }
+}
+
+// Gives agentId to the row at `index`, exactly. A row a guess listed on its
+// own for that id folds into it; a launch row a guess lent the id gets it back
+// free, for its own spawn.
+function claim(agents: AgentRun[], index: number, agentId: string): AgentRun[] {
+  const other = agents.findIndex((a, i) => i !== index && a.agentId === agentId)
+  const moved = other >= 0 ? agents[other]! : undefined
+  return agents.flatMap((a, i): AgentRun[] => {
+    if (i === index) {
+      return [{ ...a, agentId, link: 'exact', tools: a.tools + (moved?.tools ?? 0), currentTool: moved?.currentTool ?? a.currentTool }]
+    }
+    if (i !== other) return [a]
+    return a.toolUseId === undefined ? [] : [{ ...a, agentId: undefined, link: undefined, tools: 0, currentTool: undefined }]
+  })
+}
+
+export type RosterAgent = {
+  id: string
+  status: string
+  teammateId?: string
+  tokenCount?: number
+  contextWindowSize?: number
+  tokenSamples?: readonly number[]
+}
+
 // `$.agent.list()` as the backstop for a SubagentStop that never arrived: a
 // running row the roster calls ended is finished. So is one it no longer
 // lists, once past the launch grace, but only a row an Agent call launched:
-// a workflow's agents are never listed.
-export function reconcileAgents(h: Hud, live: readonly { id: string; status: string }[], now: number): Hud {
-  const statuses = new Map(live.map(a => [a.id, a.status]))
+// a workflow's agents are never listed. A row for a teammate (a guess made
+// one) goes: the roster lists it as a mate. Rows it lists with token figures
+// take their context share and last readings.
+export function reconcileAgents(h: Hud, live: readonly RosterAgent[], now: number): Hud {
+  const roster = new Map(live.map(a => [a.id, a]))
   const ended = new Set<string>()
-  const agents = h.agents.map((a): AgentRun => {
-    if (a.status !== 'running' || !a.agentId) return a
-    const status = statuses.get(a.agentId)
-    const isDropped = status === undefined && a.toolUseId !== undefined && now - a.startedAt >= AGENT_LIST_GRACE_MS
+  let isChanged = false
+  const agents = h.agents.flatMap((a): AgentRun[] => {
+    if (!a.agentId) return [a]
+    const entry = roster.get(a.agentId)
+    if (entry?.teammateId) {
+      isChanged = true
+      return []
+    }
+    if (a.status !== 'running') return [a]
+    const isDropped = entry === undefined && a.toolUseId !== undefined && now - a.startedAt >= AGENT_LIST_GRACE_MS
+    const status = entry?.status
     const end = status === 'completed' || isDropped ? 'done' : status === 'failed' || status === 'killed' ? 'failed' : undefined
-    if (!end) return a
-    ended.add(a.agentId)
-    return { ...stopWork(a, now), status: end, endedAt: now, currentTool: undefined }
+    if (end) {
+      ended.add(a.agentId)
+      isChanged = true
+      return [endRun(a, end, now)]
+    }
+    const figures = rosterFigures(entry)
+    if (!figures || (figures.ctxPercent === a.ctxPercent && sameSamples(figures.samples, a.samples))) return [a]
+    isChanged = true
+    return [{ ...a, ...figures }]
   })
-  if (ended.size === 0) return h
+  if (!isChanged) return h
   return {
     ...h,
     agents,
@@ -354,36 +491,43 @@ export function reconcileAgents(h: Hud, live: readonly { id: string; status: str
   }
 }
 
+function rosterFigures(entry: RosterAgent | undefined): Pick<AgentRun, 'ctxPercent' | 'samples'> | undefined {
+  if (!entry || entry.tokenCount === undefined) return undefined
+  const window = entry.contextWindowSize ?? 0
+  return {
+    ctxPercent: window > 0 ? (entry.tokenCount / window) * 100 : undefined,
+    samples: entry.tokenSamples ? entry.tokenSamples.slice(-MAX_AGENT_SAMPLES) : undefined,
+  }
+}
+
+function sameSamples(a: readonly number[] | undefined, b: readonly number[] | undefined): boolean {
+  if (a === b) return true
+  if (!a || !b || a.length !== b.length) return false
+  return a.every((v, i) => v === b[i])
+}
+
 export function setAgentModel(h: Hud, agentId: string, model: string): Hud {
   if (!h.agents.some(a => a.agentId === agentId && a.model !== model)) return h
   return { ...h, agents: h.agents.map(a => (a.agentId === agentId ? { ...a, model } : a)) }
 }
 
+// A row the band lists: running, or ended within the last minute.
+export function isAgentShown(a: AgentRun, now: number): boolean {
+  return a.status === 'running' || now - (a.endedAt ?? now) < DONE_AGENT_TTL_MS
+}
+
 export function pruneAgents(agents: AgentRun[], now: number): AgentRun[] {
-  return agents.filter(a => a.status === 'running' || now - (a.endedAt ?? now) < DONE_AGENT_TTL_MS)
+  return agents.filter(a => isAgentShown(a, now))
 }
 
 function isAgentRunning(h: Hud, agentId: string): boolean {
   return h.agents.some(a => a.agentId === agentId && a.status === 'running')
 }
 
-function ensureAgent(agents: AgentRun[], agentId: string, now: number, type = 'agent'): AgentRun[] {
-  if (agents.some(a => a.agentId === agentId)) return agents
-  return [
-    ...agents,
-    {
-      key: `ag:${agentId}`,
-      agentId,
-      type,
-      description: '',
-      isBackground: false,
-      startedAt: now,
-      workedMs: 0,
-      workingSince: now,
-      tools: 0,
-      status: 'running',
-    },
-  ]
+// The step recap of the running turn; one for a turn already over is dropped.
+export function setRecap(h: Hud, text: string, turn: number): Hud {
+  if (turn !== h.turn.count || h.recap?.text === text) return h
+  return { ...h, recap: { text, turn } }
 }
 
 // TaskCreate adds one; its result carries the id.

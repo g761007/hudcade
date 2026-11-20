@@ -64,12 +64,29 @@ Above the prompt, in the terminal and in the desktop app. Each row has a left an
 | Row | What it tells you |
 |---|---|
 | **Identity** | Model and effort · project and branch (dirty, ahead/behind) · lines added and removed and files edited this session · session cost, what this turn added, session time |
-| **Capacity** | Context bar, tokens left and compactions · prompt-cache hit ratio · 5-hour and 7-day limits with reset countdowns |
-| **Activity** | Working, waiting for your approval, or idle · turn number, start time (and end time once done) · the tool running now · tokens in and out this turn · output speed · tool calls and failures · task progress |
+| **Capacity** | Context bar, tokens left and compactions · prompt-cache hit ratio, and while idle how long the cache still holds the conversation (`⏳4m`, then `cache cold`) · 5-hour and 7-day limits with reset countdowns |
+| **Activity** | Working, waiting for your approval, or idle (interrupted or failed, when the last turn ended so) · turn number, start time (and end time once done) · the tool running now · tokens in and out this turn · output speed · tool calls and failures · task progress |
+| **Step recap** | One line on what the turn is doing, written by a small model as its steps go by. Off unless you turn on `recap`. |
 | **Context breakdown** | The largest parts of the window. Only appears once context passes the warning threshold. |
-| **Workers** | Subagents, teammates, background tasks and loops, while there are any |
+| **Workers** | Subagents (with their context share and how their tokens grew), teammates, background tasks and loops, while there are any |
 
 Toasts warn you when context crosses its thresholds, and before a model switch that would throw away a warm prompt cache. The toast includes what rebuilding it will cost.
+
+### Subagents
+
+Each subagent gets a row on the band: its type, model, the time it spent working, its tool calls and the tool in hand, its context share and a sparkline of its tokens. A row turns ✓ when the run completes, ✗ when it fails and ⏹ when it is stopped, and goes a minute later. Under the Agent call itself, in the transcript, a dim line shows the same while the agent runs. `/hud agents` opens a pane with every agent of the session and its task.
+
+Agents a workflow starts, forks and resumed agents get rows of their own.
+
+### Step recap
+
+With `recap` on, after Claude's tool steps a small model (`haiku` by default) reads the prompt, the steps so far and Claude's latest note, and writes one line on where the turn stands:
+
+```
+  ↳ Fixing the agent-row linking; 65 of 65 tests pass after the change
+```
+
+It makes at most one call every 10 seconds and only while a turn runs. Each call is billed to your session like any other request, and counts in its cost. It writes in the language your notifications use.
 
 ### The status line
 
@@ -133,6 +150,8 @@ Everything lives in `/config`, or run `claude plugin configure hudcade`:
 | `spinner` | `true` | The pixel spinner (terminal) |
 | `spinnerScene` | `random` | `random`, or one of `robot`, `coffee`, `garden`, `rocket`, `cat`, `fishing`, `train`, `campfire`, `weather`, `equalizer` |
 | `ctxWarnPercent` / `ctxCriticalPercent` | `60` / `80` | Context thresholds for colors, toasts and the breakdown row |
+| `recap` | `false` | The step recap row: a small model sums up the running turn (billed to your session) |
+| `recapModel` | `haiku` | Model alias or id that writes the step recap |
 | `notify` | `true` | Telegram notifications |
 | `notifyMinTurnSeconds` | `0` | Skip completion messages for shorter turns; `0` sends every turn |
 | `notifyBlocklist` | empty | Project folder names that never notify, separated by spaces |
@@ -148,6 +167,7 @@ Per project, `.claude/claude-mods.json` (shared with the team) and `.claude/clau
 Commands:
 
 - `/hud`: what is switched on, where the settings came from, and what the HUD has read.
+- `/hud agents`: open the agents pane.
 - `/hud test-notify`: send a test Telegram message.
 
 ## How it works
@@ -161,7 +181,7 @@ hudcade is a **mod**: a plugin of function hooks that runs inside Claude Code it
 
 ## Requirements
 
-- Claude Code **2.1.290** or newer. Mods are on by default from 2.1.287; their API is still marked early access.
+- Claude Code **2.1.329** or newer (the hooks use `agent.report`, `tool.run` and `tool.judge`). Mods are on by default from 2.1.287; their API is still marked early access.
 - macOS or Linux, with `git` and `date` on `PATH`.
 - A Telegram bot, only if you want notifications.
 
@@ -171,6 +191,8 @@ hudcade is a **mod**: a plugin of function hooks that runs inside Claude Code it
 - **Lines added and removed** count Edit and Write changes, not files changed through shell commands.
 - **Output speed** counts from the first streamed chunk, thinking included.
 - **Before the first reply** of a session, Claude Code has no context or rate-limit readings yet. The band says so instead of showing zeros.
+- **On Team and Enterprise plans**, Claude Code's built-in `cc-plugin-sec-default` runs ahead of every installed plugin and passes all classic hook events over, so hudcade's `classic.*` hooks never run (Claude Code says so in a line per hook). Native events cover agent rows, compactions, the cache lifetime, permission prompts (inferred from the permission check, and sent after 1.5 seconds) and `/clear`. Nothing native carries the session title, background tasks and loops, the model-switch toast or a resumed session's cold cache, so those stay empty there.
+- **Hooking tool calls** turns off Claude Code's move of a running tool to the background (Ctrl+B) while the mod is loaded.
 
 ## Troubleshooting
 

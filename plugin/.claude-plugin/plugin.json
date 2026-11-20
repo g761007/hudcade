@@ -57,6 +57,18 @@
       "description": "Context usage at which the HUD turns red and shows a toast.",
       "default": 80
     },
+    "recap": {
+      "type": "boolean",
+      "title": "Step recap",
+      "description": "While a turn runs, have a small model sum up what Claude is doing after its tool steps, in one line of the HUD band (at most one call every 10 seconds; billed to this session).",
+      "default": false
+    },
+    "recapModel": {
+      "type": "string",
+      "title": "Step recap: model",
+      "description": "Model alias or id that writes the step recap.",
+      "default": "haiku"
+    },
     "notify": {
       "type": "boolean",
       "title": "Telegram notifications",

@@ -64,12 +64,35 @@ claude plugin install hudcade@hudcade
 | 行 | 顯示內容 |
 |---|---|
 | **身分** | model 與 effort · 專案與 branch（是否有未提交的修改、領先或落後幾個 commit）· 這個 session 增刪的行數與修改過的檔案數 · session 成本、這回合增加的金額、session 時長 |
-| **容量** | context 進度條、剩餘 token、壓縮次數 · prompt 快取命中率 · 5 小時與 7 天用量上限及重置倒數 |
-| **活動** | 工作中、等待你確認權限或閒置 · 回合數、開始時間（結束後顯示開始與結束時間）· 正在執行的工具 · 本回合送出與收到的 token · 輸出速度 · 工具呼叫次數與失敗數 · task 進度 |
+| **容量** | context 進度條、剩餘 token、壓縮次數 · prompt 快取命中率，閒置時另外顯示快取還能保留多久（`⏳4m`，過期後顯示 `cache cold`）· 5 小時與 7 天用量上限及重置倒數 |
+| **活動** | 工作中、等待你確認權限或閒置（上一回合被中斷或失敗時會標示出來）· 回合數、開始時間（結束後顯示開始與結束時間）· 正在執行的工具 · 本回合送出與收到的 token · 輸出速度 · 工具呼叫次數與失敗數 · task 進度 |
+| **逐步摘要** | 由小模型隨著工具步驟寫出的一行摘要，說明這回合正在做什麼。要開啟 `recap` 才會出現 |
 | **context 組成** | 佔用 context 最多的幾個部分。只在超過警告門檻時出現 |
-| **工作者** | subagent、隊友、背景任務、排程。有資料時才出現 |
+| **工作者** | subagent（含 context 用量和 token 變化趨勢）、隊友、背景任務、排程。有資料時才出現 |
 
 context 超過門檻時，會跳出提示提醒你。切換 model 會讓仍然有效的 prompt 快取失效時，也會先提醒你，並附上重建快取的費用。
+
+### Subagent
+
+每個 subagent 在資訊列上都有一行，顯示：
+- 類型與 model
+- 實際工作的時間
+- 工具呼叫次數與正在用的工具
+- context 用量，以及 token 變化的小趨勢圖
+
+執行完成顯示 ✓、失敗顯示 ✗、被停止顯示 ⏹，一分鐘後消失。agent 執行期間，對話記錄裡那個 Agent 呼叫的下方也會有一行淡色文字顯示同樣的資訊。`/hud agents` 會開一個側邊 pane，列出這個 session 所有 agent 和各自的任務。
+
+workflow 啟動的 agent、fork 和被喚醒繼續工作的 agent 都會有自己的一行。
+
+### 逐步摘要
+
+開啟 `recap` 後，Claude 每做完工具步驟，小模型（預設 `haiku`）會讀取你的 prompt、到目前為止的步驟和 Claude 最新的說明，寫出一行目前進度：
+
+```
+  ↳ 正在修正 agent 列的連結，改完後 65 個測試全部通過
+```
+
+每 10 秒最多呼叫一次，而且只在回合進行中呼叫。每次呼叫都和其他請求一樣算在你的 session 費用裡。摘要的語言和通知訊息相同。
 
 ### 狀態列
 
@@ -140,6 +163,8 @@ Session：11fa1a35
 | `spinner` | `true` | 像素等待動畫（終端機） |
 | `spinnerScene` | `random` | `random`，或 `robot`、`coffee`、`garden`、`rocket`、`cat`、`fishing`、`train`、`campfire`、`weather`、`equalizer` 其中一組 |
 | `ctxWarnPercent` / `ctxCriticalPercent` | `60` / `80` | context 的警告與危險門檻，影響顏色、跳出提示和 context 組成行 |
+| `recap` | `false` | 逐步摘要行：由小模型摘要進行中的回合（費用算在你的 session） |
+| `recapModel` | `haiku` | 撰寫逐步摘要的 model 別名或 id |
 | `notify` | `true` | Telegram 通知 |
 | `notifyMinTurnSeconds` | `0` | 比這個秒數短的回合不發完成通知；`0` 表示每回合都發 |
 | `notifyBlocklist` | 空白 | 永遠不發通知的專案資料夾名稱，以空格分隔 |
@@ -158,6 +183,7 @@ Session：11fa1a35
 指令：
 
 - `/hud`：顯示哪些功能已開啟、設定來源，以及 HUD 目前讀到的資料。
+- `/hud agents`：開啟 agent 側邊 pane。
 - `/hud test-notify`：發送一則 Telegram 測試訊息。
 
 ## 運作方式
@@ -174,7 +200,7 @@ hudcade 是一個 **mod**，也就是由 function hooks 組成、直接在 Claud
 
 ## 系統需求
 
-- Claude Code **2.1.290** 以上。mods 從 2.1.287 起預設開啟，但 API 仍標示為 early access。
+- Claude Code **2.1.329** 以上（hook 用到 `agent.report`、`tool.run` 和 `tool.judge`）。mods 從 2.1.287 起預設開啟，但 API 仍標示為 early access。
 - macOS 或 Linux，且 `PATH` 中有 `git` 和 `date`。
 - 需要通知時，才需要準備 Telegram bot。
 
@@ -184,6 +210,10 @@ hudcade 是一個 **mod**，也就是由 function hooks 組成、直接在 Claud
 - **增刪行數**：只計算 Edit 和 Write 的修改，不包含透過 shell 指令修改的檔案。
 - **輸出速度**：從收到第一段串流內容開始計算，包含 thinking。
 - **session 第一次回覆之前**：Claude Code 還沒有 context 和用量上限的數據，資訊列會直接說明這點，不會顯示 0。
+- **Team 與 Enterprise 方案**：Claude Code 內建的 `cc-plugin-sec-default` 會排在所有已安裝外掛前面，並把所有 classic hook 事件直接往後送，所以 hudcade 的 `classic.*` hook 都不會執行（Claude Code 會為每個 hook 顯示一行說明）。
+  - 由 native 事件補上：agent 列、壓縮次數、快取保留時間、權限確認（從權限檢查推斷，1.5 秒後才通知）、`/clear`。
+  - 沒有 native 來源，在這種環境會維持空白：session 標題、背景任務與排程、切換 model 的提示、續接 session 時的冷快取。
+- **攔截工具呼叫**：mod 載入期間，Claude Code 無法把執行中的工具移到背景（Ctrl+B）。
 
 ## 疑難排解
 

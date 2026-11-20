@@ -77,6 +77,15 @@ export function bar(percent: number, width: number): string {
   return '█'.repeat(full) + (half ? '▌' : '') + '░'.repeat(Math.max(0, width - full - half))
 }
 
+// ▁▃▅█ — each reading against the lowest and highest of them; flat when they are equal.
+export function sparkline(values: readonly number[]): string {
+  const ticks = '▁▂▃▄▅▆▇█'
+  if (values.length === 0) return ''
+  const low = Math.min(...values)
+  const span = Math.max(...values) - low
+  return values.map(v => ticks[span > 0 ? Math.round(((v - low) / span) * (ticks.length - 1)) : 0]).join('')
+}
+
 // claude-opus-5-5 → Opus 5.5; claude-haiku-4-5-20251001 → Haiku 4.5
 export function modelLabel(id: string | undefined): string | undefined {
   if (!id) return undefined

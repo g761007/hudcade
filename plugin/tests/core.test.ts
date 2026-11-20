@@ -1,9 +1,10 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import type { Hud } from '../types'
-import { buildBand, displayWidth, rowText, statusLine } from '../src/core/band'
+import { agentSummary, buildBand, displayWidth, paneRows, rowText, statusLine } from '../src/core/band'
 import { parseEnvFile, resolveConfig } from '../src/core/config'
-import { bar, clock, compactDuration, modelLabel, msUntil, parseTzOffset, preciseDuration, sanitize, tokens, toolDetail, wallClock } from '../src/core/format'
+import { bar, clock, compactDuration, modelLabel, msUntil, parseTzOffset, preciseDuration, sanitize, sparkline, tokens, toolDetail, wallClock } from '../src/core/format'
+import { cleanRecap, recapRequest } from '../src/core/recap'
 import { SCENE_NAMES, SCENE_ROWS, pickScene, renderScene } from '../src/core/scenes'
 import { base64 } from '../src/core/scenes/canvas'
 import { turnFacts } from '../src/core/spinner'
@@ -11,11 +12,16 @@ import {
   addDiff,
   addRequestUsage,
   agentResult,
+  agentTurnEnded,
   agentWorkedMs,
   applyResume,
   applyUsage,
   cacheHitPercent,
+  cacheRemainingMs,
+  isAgentShown,
   noteCompaction,
+  reportAgent,
+  setRecap,
   patchCounts,
   setCtxTop,
   setTeammates,
@@ -202,7 +208,7 @@ describe('hud model', () => {
     expect(reconcileAgents(h, [], 9_999).agents[0]?.status).toBe('running')
     expect(reconcileAgents(h, [], 10_000).agents[0]).toMatchObject({ status: 'done', endedAt: 10_000 })
     // A workflow's agents are never listed: a row no Agent call launched keeps running.
-    const workflow = startTool(emptyHud('p'), { id: 'w1', tool: 'Read', detail: '', startedAt: 0, agentId: 'wf1' })
+    const workflow = spawnAgent(emptyHud('p'), { toolUseId: 'wf-call', agentId: 'wf1', type: 'general-purpose', isWorkflow: true, now: 0 })
     expect(reconcileAgents(workflow, [], 600_000).agents[0]?.status).toBe('running')
   })
 
@@ -557,5 +563,237 @@ describe('scenes', () => {
 
   test('base64 matches the standard alphabet and padding', () => {
     expect(base64(Uint32Array.of(0x2588))).toBe('iCUAAA==')
+  })
+})
+
+// Where a managed plugin passes every classic.* hook over, agent rows come from
+// agent.spawn, agent.report and turn.complete alone; elsewhere SubagentStart
+// and SubagentStop arrive too, in either order. Both must end in one row per
+// agent, on the Agent call that started it.
+describe('agent rows, native and classic', () => {
+  const EXPLORE = { type: 'Explore', isBackground: true }
+  const launch = (h: Hud, toolUseId: string, description: string, type = 'Explore') =>
+    launchAgent(h, { toolUseId, type, description, isBackground: true, now: 0 })
+  const links = (h: Hud) => h.agents.map(a => [a.description, a.agentId ?? null, a.status])
+
+  test('a workflow agent gets a row of its own and leaves a pending Agent launch alone', () => {
+    let h = launch(emptyHud('p'), 'tuA', 'explore auth')
+    h = spawnAgent(h, { toolUseId: 'wf-call', agentId: 'wf1', type: 'general-purpose', description: 'workflow agent 1', isWorkflow: true, now: 1 })
+    h = spawnAgent(h, { toolUseId: 'tuA', agentId: 'ex1', ...EXPLORE, now: 2 })
+    expect(links(h)).toEqual([
+      ['explore auth', 'ex1', 'running'],
+      ['workflow agent 1', 'wf1', 'running'],
+    ])
+  })
+
+  test('a fork no tool call starts never takes a launch row', () => {
+    let h = launch(emptyHud('p'), 'tuA', 'explore', 'fork')
+    h = spawnAgent(h, { toolUseId: '', agentId: 'fk1', type: 'fork', isWorkflow: true, now: 1 })
+    expect(links(h)).toEqual([
+      ['explore', null, 'running'],
+      ['', 'fk1', 'running'],
+    ])
+  })
+
+  test('a workflow agent’s run ends at its own turn.complete; another agent’s only pauses', () => {
+    let h = spawnAgent(emptyHud('p'), { toolUseId: 'wf-call', agentId: 'wf1', type: 'general-purpose', isWorkflow: true, now: 0 })
+    h = spawnAgent(h, { toolUseId: 'tuB', agentId: 'bg1', type: 'Plan', now: 0 })
+    h = agentTurnEnded(h, 'wf1', 30_000)
+    h = agentTurnEnded(h, 'bg1', 30_000)
+    expect(h.agents.map(a => [a.agentId, a.status, a.workingSince])).toEqual([
+      ['wf1', 'done', undefined],
+      ['bg1', 'running', undefined],
+    ])
+  })
+
+  test('classic first: a SubagentStart guess on the wrong launch gives way to the exact spawn', () => {
+    let h = launch(launch(emptyHud('p'), 'tuA', 'a'), 'tuB', 'b')
+    h = linkAgent(h, 'exB', 'Explore', 1) // guesses the oldest Explore launch: tuA
+    h = startTool(h, { id: 'g', tool: 'Grep', detail: '', startedAt: 2, agentId: 'exB' })
+    h = spawnAgent(h, { toolUseId: 'tuB', agentId: 'exB', ...EXPLORE, now: 3 })
+    h = spawnAgent(h, { toolUseId: 'tuA', agentId: 'exA', ...EXPLORE, now: 4 })
+    expect(links(h)).toEqual([
+      ['a', 'exA', 'running'],
+      ['b', 'exB', 'running'],
+    ])
+    expect(h.agents.map(a => [a.tools, a.link])).toEqual([
+      [0, 'exact'],
+      [1, 'exact'],
+    ])
+  })
+
+  test('native first: a later SubagentStart changes nothing', () => {
+    let h = launch(launch(emptyHud('p'), 'tuA', 'a'), 'tuB', 'b')
+    h = spawnAgent(h, { toolUseId: 'tuB', agentId: 'exB', ...EXPLORE, now: 1 })
+    expect(linkAgent(h, 'exB', 'Explore', 2)).toBe(h)
+  })
+
+  test('classic first with a workflow agent: the launch it borrowed is freed for its own spawn', () => {
+    let h = launch(emptyHud('p'), 'tuA', 'review', 'general-purpose')
+    h = linkAgent(h, 'wf1', 'general-purpose', 1)
+    h = spawnAgent(h, { toolUseId: 'wf-call', agentId: 'wf1', type: 'general-purpose', description: 'workflow agent 1', isWorkflow: true, now: 2 })
+    h = spawnAgent(h, { toolUseId: 'tuA', agentId: 'gp1', type: 'general-purpose', now: 3 })
+    expect(links(h)).toEqual([
+      ['review', 'gp1', 'running'],
+      ['workflow agent 1', 'wf1', 'running'],
+    ])
+  })
+
+  test('a SubagentStart of another type lists the agent alone; the Agent result folds that row in', () => {
+    let h = launch(emptyHud('p'), 'tuA', 'a', 'lab:runner')
+    h = linkAgent(h, 'ag1', 'runner', 1)
+    h = startTool(h, { id: 'x', tool: 'Bash', detail: '', startedAt: 2, agentId: 'ag1' })
+    h = agentResult(h, 'tuA', { agentId: 'ag1', isLaunchOnly: false, isError: false }, 9)
+    expect(links(h)).toEqual([['a', 'ag1', 'done']])
+    expect(h.agents[0]?.tools).toBe(1)
+  })
+
+  test('agent.report ends a run with its status, and corrects one the roster ended first', () => {
+    const running = () => spawnAgent(emptyHud('p'), { toolUseId: 'tu', agentId: 'ag1', type: 'Explore', now: 0 })
+    expect(reportAgent(running(), 'ag1', 'completed', 5).agents[0]).toMatchObject({ status: 'done', endedAt: 5 })
+    expect(reportAgent(running(), 'ag1', 'stopped', 5).agents[0]).toMatchObject({ status: 'stopped', endedAt: 5 })
+    const byRoster = reconcileAgents(running(), [{ id: 'ag1', status: 'completed' }], 4)
+    expect(reportAgent(byRoster, 'ag1', 'failed', 5).agents[0]).toMatchObject({ status: 'failed', endedAt: 4 })
+    expect(reportAgent(byRoster, 'ag1', 'completed', 5)).toBe(byRoster)
+  })
+
+  test('an agent resumed under its id runs again', () => {
+    let h = spawnAgent(emptyHud('p'), { toolUseId: 'tu', agentId: 'ag1', type: 'Explore', now: 0 })
+    h = reportAgent(h, 'ag1', 'completed', 10)
+    h = spawnAgent(h, { toolUseId: 'send', agentId: 'ag1', type: 'Explore', isResume: true, now: 20 })
+    expect(h.agents).toHaveLength(1)
+    expect(h.agents[0]).toMatchObject({ status: 'running', workingSince: 20, endedAt: undefined })
+  })
+
+  test('a teammate’s calls make no agent row, and a row a guess made for one goes', () => {
+    let h = startTool(emptyHud('p'), { id: 'm', tool: 'Read', detail: '', startedAt: 0, agentId: 'mate1' })
+    expect(h.agents).toEqual([])
+    h = linkAgent(h, 'mate1', 'reviewer', 1)
+    h = reconcileAgents(h, [{ id: 'mate1', status: 'idle', teammateId: 'reviewer@team' }], 2)
+    expect(h.agents).toEqual([])
+  })
+
+  test('the roster’s token figures give a running row its context share and last readings', () => {
+    let h = spawnAgent(emptyHud('p'), { toolUseId: 'tu', agentId: 'ag1', type: 'Explore', now: 0 })
+    const samples = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    h = reconcileAgents(h, [{ id: 'ag1', status: 'running', tokenCount: 50_000, contextWindowSize: 200_000, tokenSamples: samples }], 5)
+    expect(h.agents[0]).toMatchObject({ ctxPercent: 25, samples: [3, 4, 5, 6, 7, 8, 9, 10] })
+    const same = reconcileAgents(h, [{ id: 'ag1', status: 'running', tokenCount: 50_000, contextWindowSize: 200_000, tokenSamples: samples }], 6)
+    expect(same).toBe(h)
+  })
+
+  test('an ended row is shown for a minute, whether or not anything prunes it', () => {
+    const h = reportAgent(spawnAgent(emptyHud('p'), { toolUseId: 'tu', agentId: 'ag1', type: 'Explore', now: 0 }), 'ag1', 'completed', 1_000)
+    expect(isAgentShown(h.agents[0]!, 60_999)).toBe(true)
+    expect(isAgentShown(h.agents[0]!, 61_000)).toBe(false)
+    const band = (now: number) => buildBand(h, now, 200, { warnPercent: 60, criticalPercent: 80 }).map(rowText).join('\n')
+    expect(band(30_000)).toContain('✓ Explore')
+    expect(band(61_000)).not.toContain('Explore')
+  })
+})
+
+describe('prompt cache lifetime', () => {
+  const usage = (extra: object) => ({ input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 900, cache_creation_input_tokens: 100, ...extra })
+
+  test('a request’s writes name the lifetime; a read keeps it and renews it from when it was sent', () => {
+    let h = addRequestUsage(emptyHud('p'), usage({ ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 100 }), 1_000, 10_000)
+    expect(cacheRemainingMs(h.cache, 10_000)).toBe(3_600_000)
+    h = addRequestUsage(h, usage({ cache_creation_input_tokens: 0 }), 1_000, 50_000)
+    expect(h.cache?.ttl).toBe('1h')
+    expect(cacheRemainingMs(h.cache, 50_000)).toBe(3_600_000)
+    h = addRequestUsage(h, usage({ ephemeral_5m_input_tokens: 100, ephemeral_1h_input_tokens: 0 }), 1_000, 60_000)
+    expect(cacheRemainingMs(h.cache, 60_000 + 300_000)).toBe(0)
+  })
+
+  test('no lifetime is shown while none is known', () => {
+    const h = addRequestUsage(emptyHud('p'), usage({}), 1_000, 0)
+    expect(cacheRemainingMs(h.cache, 0)).toBeUndefined()
+  })
+
+  test('the idle band counts down, then says cold', () => {
+    let h = startTurn(emptyHud('p'), 0)
+    h = addRequestUsage(h, usage({ ephemeral_5m_input_tokens: 100, ephemeral_1h_input_tokens: 0 }), 1_000, 0)
+    const working = buildBand(h, 10_000, 200, { warnPercent: 60, criticalPercent: 80 }).map(rowText).join('\n')
+    expect(working).not.toContain('⏳')
+    h = completeTurn(h, 20_000, 20_000)
+    const at = (now: number) => buildBand(h, now, 200, { warnPercent: 60, criticalPercent: 80 }).map(rowText).join('\n')
+    expect(at(60_000)).toContain('⏳4m')
+    expect(at(260_000)).toContain('⏳40s')
+    expect(at(300_000)).toContain('cache cold')
+  })
+})
+
+describe('turn outcome and step recap', () => {
+  const band = (h: Hud) => buildBand(h, 10_000, 200, { warnPercent: 60, criticalPercent: 80 }).map(rowText)
+
+  test('the idle band says how the last turn ended', () => {
+    const ended = (outcome: 'answer' | 'aborted' | 'error') => band(completeTurn(startTurn(emptyHud('p'), 0), 5_000, 5_000, outcome))[2]
+    expect(ended('answer')).toContain('○ idle · turn 1')
+    expect(ended('aborted')).toContain('⏹ interrupted · turn 1')
+    expect(ended('error')).toContain('✗ error · turn 1')
+  })
+
+  test('a recap shows under the activity row for its own turn only', () => {
+    let h = startTurn(emptyHud('p'), 0)
+    h = setRecap(h, '正在修正 agent 列連結', 1)
+    expect(band(h)[3]).toBe('  ↳ 正在修正 agent 列連結')
+    expect(setRecap(h, 'stale', 0)).toBe(h)
+    expect(band(startTurn(h, 9_000)).join('\n')).not.toContain('↳ 正在')
+  })
+
+  test('the recap request names the language, numbers the steps and keeps the last twelve', () => {
+    const steps = Array.from({ length: 14 }, (_, i) => ({ tool: i === 13 ? 'mcp__lab__run' : 'Read', detail: `f${i + 1}.ts`, isError: i === 12 }))
+    const { system, prompt } = recapRequest({ language: 'zh-TW', task: 'fix the agent rows', steps, note: 'Tests pass now.', runningAgents: 2 })
+    expect(system).toContain('Traditional Chinese as used in Taiwan')
+    expect(prompt).toContain('Task: fix the agent rows')
+    expect(prompt).toContain('Steps so far (14, the first 2 left out):')
+    expect(prompt).not.toContain('f2.ts')
+    expect(prompt).toContain('3. Read: f3.ts')
+    expect(prompt).toContain('13. Read: f13.ts (failed)')
+    expect(prompt).toContain('14. lab:run: f14.ts')
+    expect(prompt).toContain("The agent's latest note: Tests pass now.")
+    expect(prompt).toContain('Subagents running: 2')
+  })
+
+  test('a recap answer is cleaned to one plain line', () => {
+    expect(cleanRecap('進度：「正在跑測試」\n第二行')).toBe('正在跑測試')
+    expect(cleanRecap('Recap: "Editing band.ts"')).toBe('Editing band.ts')
+    expect(cleanRecap('\u001b[31mred\u001b[0m text')).toBe('red text')
+    expect(cleanRecap('x'.repeat(200))).toHaveLength(120)
+  })
+
+  test('recap is off by default and its model can be set per project', () => {
+    expect(resolveConfig({}, []).config).toMatchObject({ recap: false, recapModel: 'haiku' })
+    const { config, warnings } = resolveConfig({}, [{ source: 'p', values: { recap: true, recapModel: 'sonnet' } }])
+    expect(config).toMatchObject({ recap: true, recapModel: 'sonnet' })
+    expect(warnings).toEqual([])
+    expect(resolveConfig({ recap: 'yes', recapModel: ' ' }, []).warnings).toHaveLength(2)
+  })
+})
+
+describe('agent views', () => {
+  test('the line under an Agent call: model, time, tools, context and how its tokens grew', () => {
+    let h = launchAgent(emptyHud('p'), { toolUseId: 'tu', type: 'Explore', description: 'find', model: 'claude-haiku-5-5', isBackground: false, now: 0 })
+    h = spawnAgent(h, { toolUseId: 'tu', agentId: 'ag1', type: 'Explore', now: 0 })
+    h = startTool(h, { id: 'g', tool: 'Grep', detail: '', startedAt: 1_000, agentId: 'ag1' })
+    h = reconcileAgents(h, [{ id: 'ag1', status: 'running', tokenCount: 68_000, contextWindowSize: 200_000, tokenSamples: [10, 20, 40] }], 2_000)
+    expect(agentSummary(h.agents[0]!, 42_000)).toBe('  ↳ ◑ Explore · Haiku 5.5 · 0:42 · 1 tools · ctx 34% ▁▃█ ▸ Grep')
+  })
+
+  test('the pane lists every agent with its task, then the other workers', () => {
+    let h = spawnAgent(emptyHud('p'), { toolUseId: 'tu', agentId: 'ag1', type: 'Plan', description: 'plan the fix', now: 0 })
+    h = reportAgent(h, 'ag1', 'stopped', 5_000)
+    h = setTeammates(h, [{ id: 'm1', teammateId: 'rev@t', name: 'rev', status: 'idle', description: 'review' }])
+    const rows = paneRows(h, 600_000).map(row => row.map(seg => seg.text).join(''))
+    expect(rows[0]).toContain('⏹ Plan')
+    expect(rows[1]).toBe('   plan the fix')
+    expect(rows[2]).toContain('◇ rev · idle')
+    expect(paneRows(emptyHud('p'), 0).map(row => row.map(seg => seg.text).join(''))).toEqual(['No agents in this session yet.'])
+  })
+
+  test('a sparkline spans its lowest to highest reading', () => {
+    expect(sparkline([0, 2, 14])).toBe('▁▂█')
+    expect(sparkline([5, 5])).toBe('▁▁')
+    expect(sparkline([])).toBe('')
   })
 })

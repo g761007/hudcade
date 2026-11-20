@@ -35,6 +35,12 @@ export type AgentRun = {
   key: string
   toolUseId?: string
   agentId?: string
+  // How agentId was attached: `exact` by agent.spawn or the Agent call's own
+  // result, `guess` by a classic SubagentStart matching the agent type.
+  link?: 'exact' | 'guess'
+  // A workflow's agent() or a fork no tool call starts: no roster row or
+  // report ends it, so its own turn.complete does.
+  isWorkflow?: boolean
   type: string
   description: string
   model?: string
@@ -46,7 +52,10 @@ export type AgentRun = {
   workingSince?: number
   tools: number
   currentTool?: string
-  status: 'running' | 'done' | 'failed'
+  // From the engine's roster: the share of its window in use, and its last token readings.
+  ctxPercent?: number
+  samples?: number[]
+  status: 'running' | 'done' | 'failed' | 'stopped'
 }
 
 export type TaskItem = {
@@ -64,6 +73,8 @@ export type CacheStats = {
   isCold?: boolean
   rebuildUsd?: number
   ttl?: '5m' | '1h'
+  // When the last main-thread request was sent: the cache lifetime counts from it.
+  lastRequestAt?: number
 }
 
 export type TurnTokens = { input: number; output: number }
@@ -85,7 +96,12 @@ export type TurnState = {
   endedAt?: number
   lastDurationMs?: number
   costAtStart?: number
+  // How the last turn ended.
+  outcome?: 'answer' | 'aborted' | 'refusal' | 'error'
 }
+
+// A one-line account of the running turn, written by a small model as its steps go by.
+export type Recap = { text: string; turn: number }
 
 export type Hud = {
   model?: string
@@ -111,6 +127,7 @@ export type Hud = {
   crons: Cron[]
   teammates: Teammate[]
   ctxTop?: CtxSlice[]
+  recap?: Recap
 }
 
 declare module 'claude-code' {

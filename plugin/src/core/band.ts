@@ -4,6 +4,7 @@
 //   identity   ◆ model · effort   project ⎇ branch   +added −removed · files      cost +turn · ◷ time
 //   capacity   ctx bar % · left · ⟲compactions                cache % │ 5h bar % reset │ 7d bar % reset
 //   activity   ● status clock · turn n   since start / start–end   ◑ tool    ↑in ↓out · tok/s │ tasks d/n ▸ active
+//   (recap)    ↳ a small model's line on what the turn is doing, when recap is on
 //   (context)  ↳ the largest parts of the window, once context passes the warning threshold
 //   workers    agent / mate / bg / loop rows, while there are any
 
@@ -16,12 +17,13 @@ import {
   modelLabel,
   msUntil,
   rateLabel,
+  sparkline,
   tokens,
   toolLabel,
   truncate,
   usd,
 } from './format'
-import { agentWorkedMs, cacheHitPercent, withDefaults } from './hud-model'
+import { agentWorkedMs, cacheHitPercent, cacheRemainingMs, isAgentShown, withDefaults } from './hud-model'
 
 export type Seg = { text: string; color?: string; dim?: boolean; bold?: boolean }
 export type Row = { left: Seg[]; right: Seg[] }
@@ -40,6 +42,10 @@ const MAX_WORKER_ROWS = 4
 export function buildBand(raw: Hud, now: number, columns: number, options: BandOptions): Row[] {
   const h = withDefaults(raw)
   const rows = [identityRow(h, now), capacityRow(h, now, options), activityRow(h, now)].map(groups => fit(groups, columns))
+  if (h.recap && h.recap.turn === h.turn.count) {
+    const isLive = h.turn.status !== 'idle'
+    rows.push(fit([{ priority: 0, side: 'left', segs: [{ text: '  ↳ ', dim: true }, { text: h.recap.text, color: isLive ? 'suggestion' : undefined, dim: !isLive }] }], columns))
+  }
   const percent = ctxPercent(h)
   if (percent !== undefined && percent >= options.warnPercent && h.ctxTop?.length) {
     rows.push(fit([contextGroup(h)], columns))
@@ -125,7 +131,7 @@ function capacityRow(h: Hud, now: number, options: BandOptions): Group[] {
     })
   }
 
-  const cache = cacheGroup(h)
+  const cache = cacheGroup(h, now)
   if (cache) groups.push(cache)
 
   h.rates.forEach((rate, i) => {
@@ -145,13 +151,18 @@ function capacityRow(h: Hud, now: number, options: BandOptions): Group[] {
   return groups
 }
 
-function cacheGroup(h: Hud): Group | undefined {
+// While idle, how long the prompt cache still holds the conversation: past
+// that, the next prompt writes it again.
+function cacheGroup(h: Hud, now: number): Group | undefined {
   const hit = cacheHitPercent(h.cache)
-  if (h.cache?.isCold) {
-    const cost = h.cache.rebuildUsd ? ` ~${usd(h.cache.rebuildUsd)}` : ''
+  const remaining = h.turn.status === 'idle' ? cacheRemainingMs(h.cache, now) : undefined
+  if (h.cache?.isCold || (remaining !== undefined && remaining <= 0)) {
+    const cost = h.cache?.isCold && h.cache.rebuildUsd ? ` ~${usd(h.cache.rebuildUsd)}` : ''
     return { priority: 4, side: 'right', segs: [{ text: `cache cold${cost}`, color: 'warning' }] }
   }
   if (hit === undefined) return undefined
+  const countdown: Seg[] =
+    remaining !== undefined ? [{ text: ` ⏳${compactDuration(remaining)}`, color: remaining < 60_000 ? 'warning' : undefined, dim: remaining >= 60_000 }] : []
   const last = h.cache?.lastHitPercent
   const isMiss = last !== undefined && last < 50 && (h.cache?.requests ?? 0) > 1
   return {
@@ -161,6 +172,7 @@ function cacheGroup(h: Hud): Group | undefined {
       { text: 'cache ', dim: true },
       { text: `${Math.round(hit)}%`, color: hit >= 70 ? 'success' : hit < 40 ? 'warning' : undefined },
       ...(isMiss ? [{ text: ` last ${Math.round(last)}%`, color: 'warning' }] : []),
+      ...countdown,
     ],
   }
 }
@@ -170,7 +182,13 @@ function activityRow(h: Hud, now: number): Group[] {
   const { turn } = h
   const at = (ms: number) => wallClock(ms, h.tzOffsetMinutes)
   if (turn.status === 'idle') {
-    groups.push({ priority: 0, side: 'left', segs: [{ text: `○ idle · turn ${turn.count}`, dim: true }] })
+    const status: Seg =
+      turn.outcome === 'aborted'
+        ? { text: '⏹ interrupted', color: 'warning' }
+        : turn.outcome === 'error'
+          ? { text: '✗ error', color: 'error' }
+          : { text: '○ idle', dim: true }
+    groups.push({ priority: 0, side: 'left', segs: [status, { text: ` · turn ${turn.count}`, dim: true }] })
     if (turn.startedAt !== undefined && turn.endedAt !== undefined) {
       const took = turn.lastDurationMs !== undefined ? ` (${clock(turn.lastDurationMs)})` : ''
       groups.push({ priority: 2, side: 'left', segs: [{ text: `${at(turn.startedAt)}–${at(turn.endedAt)}${took}`, dim: true }] })
@@ -235,10 +253,9 @@ function contextGroup(h: Hud): Group {
 
 // ── Workers ─────────────────────────────────────────────────────────────────
 
-function workerRows(h: Hud, now: number): Seg[][] {
+function workerRows(h: Hud, now: number, maxRows = MAX_WORKER_ROWS): Seg[][] {
   const rows: Seg[][] = []
-  const agents = [...h.agents].sort((a, b) => rankAgent(a) - rankAgent(b) || a.startedAt - b.startedAt)
-  for (const agent of agents) rows.push(agentRow(agent, now))
+  for (const agent of sortAgents(h.agents.filter(a => isAgentShown(a, now)))) rows.push([tag('agent'), ...agentRow(agent, now)])
   for (const mate of h.teammates) {
     const isBusy = mate.status === 'running' || mate.status === 'pending'
     rows.push([
@@ -262,29 +279,66 @@ function workerRows(h: Hud, now: number): Seg[][] {
       { text: `${cron.isRecurring ? '' : ' · once'} · ${truncate(cron.prompt.replace(/\s+/g, ' '), 60)}`, dim: true },
     ])
   }
-  if (rows.length <= MAX_WORKER_ROWS) return rows
-  return [...rows.slice(0, MAX_WORKER_ROWS - 1), [{ text: `  +${rows.length - MAX_WORKER_ROWS + 1} more`, dim: true }]]
+  if (rows.length <= maxRows) return rows
+  return [...rows.slice(0, maxRows - 1), [{ text: `  +${rows.length - maxRows + 1} more`, dim: true }]]
 }
 
-function rankAgent(a: AgentRun): number {
-  return a.status === 'running' ? 0 : 1
+function sortAgents(agents: readonly AgentRun[]): AgentRun[] {
+  const rank = (a: AgentRun) => (a.status === 'running' ? 0 : 1)
+  return [...agents].sort((a, b) => rank(a) - rank(b) || a.startedAt - b.startedAt)
 }
 
-function agentRow(a: AgentRun, now: number): Seg[] {
+const AGENT_LOOK: Record<Exclude<AgentRun['status'], 'running'>, { glyph: string; color: string }> = {
+  done: { glyph: '✓', color: 'success' },
+  failed: { glyph: '✗', color: 'error' },
+  stopped: { glyph: '⏹', color: 'warning' },
+}
+
+function agentRow(a: AgentRun, now: number, options: { hasDescription?: boolean } = {}): Seg[] {
   const isRunning = a.status === 'running'
-  const glyph = isRunning ? spin(now) : a.status === 'done' ? '✓' : '✗'
-  const color = isRunning ? 'suggestion' : a.status === 'done' ? 'success' : 'error'
+  const look = a.status === 'running' ? { glyph: spin(now), color: 'suggestion' } : AGENT_LOOK[a.status] ?? AGENT_LOOK.done
   const model = modelLabel(a.model)
   return [
-    tag('agent'),
-    { text: `${glyph} `, color },
-    { text: a.type, color, bold: isRunning },
+    { text: `${look.glyph} `, color: look.color },
+    { text: a.type, color: look.color, bold: isRunning },
     ...(model ? [{ text: ` · ${model}`, dim: true }] : []),
     ...(a.isBackground ? [{ text: ' · bg', dim: true }] : []),
     { text: ` · ${clock(agentWorkedMs(a, now))} · ${a.tools} tools`, dim: true },
+    ...(isRunning ? agentLoad(a) : []),
     ...(a.currentTool ? [{ text: ` ▸ ${toolLabel(a.currentTool)}`, color: 'suggestion' }] : []),
-    ...(a.description ? [{ text: ` · ${a.description}`, dim: !isRunning }] : []),
+    ...(a.description && options.hasDescription !== false ? [{ text: ` · ${a.description}`, dim: !isRunning }] : []),
   ]
+}
+
+// ctx 34% ▂▃▅▆ — the share of its window in use and how its tokens grew.
+function agentLoad(a: AgentRun): Seg[] {
+  const segs: Seg[] = []
+  if (a.ctxPercent !== undefined) {
+    segs.push({ text: ` · ctx ${Math.round(a.ctxPercent)}%`, color: a.ctxPercent >= 80 ? 'warning' : undefined, dim: a.ctxPercent < 80 })
+  }
+  if (a.samples && a.samples.length > 1) segs.push({ text: ` ${sparkline(a.samples)}`, dim: true })
+  return segs
+}
+
+// The line under an Agent call's transcript row while its agent runs.
+export function agentSummary(a: AgentRun, now: number): string {
+  return `  ↳ ${agentRow(a, now, { hasDescription: false })
+    .map(seg => seg.text)
+    .join('')}`
+}
+
+// The agents pane: every agent of the session still listed, with its task on
+// a line of its own, then teammates, background tasks and scheduled prompts.
+export function paneRows(raw: Hud, now: number): Seg[][] {
+  const h = withDefaults(raw)
+  const rows: Seg[][] = []
+  for (const agent of sortAgents(h.agents)) {
+    rows.push(agentRow(agent, now, { hasDescription: false }))
+    if (agent.description) rows.push([{ text: `   ${agent.description}`, dim: agent.status !== 'running' }])
+  }
+  for (const row of workerRows({ ...h, agents: [] }, now, Number.POSITIVE_INFINITY)) rows.push(row)
+  if (rows.length === 0) rows.push([{ text: 'No agents in this session yet.', dim: true }])
+  return rows
 }
 
 function tag(name: string): Seg {
