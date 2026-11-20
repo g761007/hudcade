@@ -670,3 +670,325 @@ describe('step recap', () => {
     expect(calls).toEqual([])
   })
 })
+
+describe('turn replay', () => {
+  // A docked pane: tall and narrow.
+  const PANE_PROPS = { title: 'hudcade · replay', isFocused: true, bodyColumns: 90, placement: 'dock', scroll: { offset: 0, bodyRows: 20 }, view: {} }
+  const DONE = { answer: 'ok', durationMs: 5_000, isAborted: false } as const
+  const SPAWN = { prompt: 'p', provider: { plugin: 'engine', tier: 'core' }, parentModel: 'claude-opus-5-5', fork: false }
+
+  function mountReplay($: Engine, surface: 'terminal' | 'desktop' = 'terminal', props: object = {}) {
+    return $.ui.mount({ plugin: PLUGIN, surface, component: 'Pane', requestId: 'hudcade-replay', props: { ...PANE_PROPS, ...props } } as never)
+  }
+
+  async function replayText($: Engine, surface: 'terminal' | 'desktop' = 'terminal'): Promise<string> {
+    const ui = await mountReplay($, surface)
+    const texts = await ui.findAll({ type: 'Text' })
+    await ui.unmount()
+    return texts.map(t => t.text).join('')
+  }
+
+  async function press($: Engine, key: string): Promise<void> {
+    const ui = await mountReplay($)
+    await ui.press({ key })
+    await ui.unmount()
+  }
+
+  async function buttons($: Engine): Promise<string[]> {
+    const ui = await mountReplay($)
+    const found = await ui.findAll({ type: 'Button' })
+    await ui.unmount()
+    return found.map(b => b.key ?? '').filter(key => !key.startsWith('step-'))
+  }
+
+  // What the diff view draws, when it is open.
+  async function diffShown($: Engine): Promise<string | undefined> {
+    const ui = await mountReplay($)
+    const code = await ui.find({ type: 'Code' })
+    await ui.unmount()
+    return code?.props.source as string | undefined
+  }
+
+  // The engine beneath: files as they stand, tool calls (an Edit of a path
+  // with "refused" in it is refused), panes and frames.
+  function engine(on: On, files: Record<string, string> = {}, call?: (tool: string) => unknown): { opened: string[]; opens: unknown[] } {
+    const seen = { opened: [] as string[], opens: [] as unknown[] }
+    on('turn.start', (_$, e) => ({ turnId: e.turnId }))
+    on('turn.complete', (_$, e) => ({ text: e.answer }) as never)
+    on('fs.exists', (_$, e) => ({ value: (e as { path: string }).path in files }) as never)
+    on('fs.read', (_$, e) => ({ value: files[(e as { path: string }).path] ?? '' }) as never)
+    on('tool.call', (_$, e) => {
+      const input = e as unknown as Record<string, unknown>
+      const answer = call?.(e.tool)
+      if (answer !== undefined) return answer as never
+      if (String(input.file_path ?? '').includes('refused')) return { deny: 'The person refused it.' } as never
+      return { result: { stdout: '', stderr: '' }, text: '' } as never
+    })
+    on('ui.open', (_$, e) => {
+      seen.opened.push(e.id)
+      seen.opens.push(e)
+      return { value: { isPlaced: true } } as never
+    })
+    on('ui.close', () => ({ value: undefined }) as never)
+    return seen
+  }
+
+  test('opens on the first step and stays there: the person moves, by key or by pressing a step', async ($, on) => {
+    const clock = mock.clock(on)
+    engineDraws(on)
+    const seen = engine(on)
+
+    await $.turn.start({ text: 'rename greet to welcome', turnId: 't1' })
+    await $.tool.call({ tool: 'Read', file_path: '/w/src/a.ts' } as never)
+    await $.tool.call({ tool: 'Grep', pattern: 'greet' } as never)
+    await $.tool.call({ tool: 'Bash', command: 'npm test', description: 'Run tests' } as never)
+    await $.turn.complete({ ...DONE, turnId: 't1' } as never)
+
+    expect(await bandText($)).toContain('▶ /hud replay (3 steps)')
+    expect(await $.command.run({ command: 'hud', args: 'replay' } as never)).toMatchObject({ text: 'Replay of turn 1: 3 steps.' })
+    expect(seen.opened).toEqual(['hudcade-replay'])
+    expect(await replayText($)).toContain('▶ step 1 / 3')
+
+    // Time alone moves nothing.
+    await clock.advance(10_000)
+    expect(await replayText($)).toContain('▶ step 1 / 3')
+
+    await press($, 'next')
+    expect(await replayText($)).toContain('Grep greet ✓')
+    await press($, 'step-2')
+    expect(await replayText($)).toContain('▶ step 3 / 3')
+    await press($, 'next')
+    expect(await replayText($)).toContain('■ done · turn 1')
+    await press($, 'prev')
+    expect(await replayText($)).toContain('▶ step 3 / 3')
+  })
+
+  test('an edit shows its lines; its diff, read before it ran, opens on d, refused ones too, and n goes to the next one with a diff', async ($, on) => {
+    mock.clock(on)
+    engineDraws(on)
+    engine(on, { '/w/a.ts': 'one\ntwo\nthree\n', '/w/refused.ts': 'x\n' })
+
+    await $.turn.start({ text: 'fix it', turnId: 't1' })
+    await $.tool.call({ tool: 'Edit', file_path: '/w/a.ts', old_string: 'two', new_string: 'TWO\nmore' } as never)
+    await $.tool.call({ tool: 'Grep', pattern: 'x' } as never)
+    await $.tool.call({ tool: 'Edit', file_path: '/w/refused.ts', old_string: 'x', new_string: 'y' } as never)
+    await $.turn.complete({ ...DONE, turnId: 't1' } as never)
+    await $.command.run({ command: 'hud', args: 'replay' } as never)
+
+    expect(await replayText($)).toContain('Edit a.ts +2 −1 ✓')
+    expect(await diffShown($)).toBeUndefined()
+    expect(await buttons($)).toEqual(['prev', 'next', 'diff', 'close'])
+
+    await press($, 'diff')
+    expect(await diffShown($)).toBe(['@@ -1,3 +1,4 @@', ' one', '-two', '+TWO', '+more', ' three'].join('\n'))
+    expect(await buttons($)).toEqual(['prev', 'next', 'back', 'close'])
+    // The next step with a diff, past the Grep: the refused Edit, as it was asked.
+    await press($, 'next')
+    expect(await diffShown($)).toBe(['@@ -1,1 +1,1 @@', '-x', '+y'].join('\n'))
+    expect(await replayText($)).toContain('Edit refused.ts +1 −1 ✗')
+    await press($, 'back')
+    expect(await diffShown($)).toBeUndefined()
+    expect(await replayText($)).toContain('▶ step 3 / 3')
+    // The summary counts the lines of the edit that went through.
+    await press($, 'next')
+    expect(await replayText($)).toContain('3 steps · 1 failed +2 −1')
+  })
+
+  test('a subagent’s calls make a track of its own, entered from its Agent call’s step and left with back', async ($, on) => {
+    mock.clock(on)
+    engineDraws(on)
+    // A foreground Agent call runs until its agent is done.
+    let reached = () => {}
+    const isAgentRunning = new Promise<void>(resolve => (reached = resolve))
+    let release = () => {}
+    const isAgentDone = new Promise<void>(resolve => (release = resolve))
+    engine(on, {}, tool => {
+      if (tool !== 'Agent') return undefined
+      reached()
+      return isAgentDone.then(() => ({ result: { status: 'completed', agentId: 'ag1' }, text: '' }))
+    })
+    on('agent.spawn', () => ({ model: 'claude-haiku-5-5', agentId: 'ag1' }) as never)
+
+    await $.turn.start({ text: 'where is greet used', turnId: 't1' })
+    await $.tool.call({ tool: 'Read', file_path: '/w/a.ts' } as never)
+    // The Agent call is noted before it runs; the spawn, as it runs, links it to its agent.
+    const agentCall = $.tool.call({ tool: 'Agent', tool_use_id: 'tuA', description: 'find usages', subagent_type: 'Explore', prompt: 'p' } as never)
+    await isAgentRunning
+    await $.agent.spawn({ ...SPAWN, tool_use_id: 'tuA', description: 'find usages', subagentType: 'Explore', background: false } as never)
+    await $.tool.call({ tool: 'Grep', pattern: 'greet', agentId: 'ag1', tool_use_id: 'g1' } as never)
+    await $.tool.call({ tool: 'Read', file_path: '/w/b.ts', agentId: 'ag1', tool_use_id: 'r1' } as never)
+    release()
+    await agentCall
+    await $.turn.complete({ ...DONE, turnId: 't1' } as never)
+
+    // Its calls are not the main line's.
+    expect(await $.command.run({ command: 'hud', args: 'replay' } as never)).toMatchObject({ text: 'Replay of turn 1: 2 steps.' })
+    await press($, 'next')
+    expect(await replayText($)).toContain('find usages ⤷ 2')
+    expect(await buttons($)).toEqual(['prev', 'next', 'agent', 'close'])
+
+    await press($, 'agent')
+    let shown = await replayText($)
+    expect(shown).toContain('▶ step 1 / 2 · Explore')
+    expect(shown).toContain('Grep greet ✓')
+    expect(shown).toContain('“find usages”')
+    await press($, 'next')
+    expect(await replayText($)).toContain('Read b.ts ✓')
+
+    await press($, 'back')
+    shown = await replayText($)
+    expect(shown).toContain('▶ step 2 / 2 · turn 1')
+    expect(shown).toContain('Agent find usages')
+  })
+
+  test('a background agent’s calls after its turn ended join its track; a call cut off by the turn’s end is unfinished', async ($, on) => {
+    mock.clock(on)
+    engineDraws(on)
+    // A background Agent call answers at once; the Bash call never ends.
+    let reached = () => {}
+    const isBashRunning = new Promise<void>(resolve => (reached = resolve))
+    engine(on, {}, tool => {
+      if (tool === 'Agent') return { result: { status: 'async_launched', agentId: 'ag2' }, text: '' }
+      if (tool !== 'Bash') return undefined
+      reached()
+      return new Promise(() => {})
+    })
+    on('agent.spawn', () => ({ model: 'claude-haiku-5-5', agentId: 'ag2' }) as never)
+
+    await $.turn.start({ text: 'look around', turnId: 't1' })
+    const agentCall = $.tool.call({ tool: 'Agent', tool_use_id: 'tuB', description: 'scan the repo', subagent_type: 'Explore', prompt: 'p', run_in_background: true } as never)
+    await $.agent.spawn({ ...SPAWN, tool_use_id: 'tuB', description: 'scan the repo', subagentType: 'Explore', background: true } as never)
+    await agentCall
+    // Interrupted while this runs.
+    void $.tool.call({ tool: 'Bash', command: 'sleep 99', description: 'Wait' } as never)
+    await isBashRunning
+    await $.turn.complete({ ...DONE, isAborted: true, reason: 'aborted', turnId: 't1' } as never)
+    await $.tool.call({ tool: 'Grep', pattern: 'todo', agentId: 'ag2', tool_use_id: 'g9' } as never)
+
+    await $.command.run({ command: 'hud', args: 'replay' } as never)
+    await press($, 'next')
+    expect(await replayText($)).toContain('Bash Wait ⏹')
+    await press($, 'next')
+    expect(await replayText($)).toContain('2 steps · 1 unfinished · 1 agent')
+    await press($, 'step-0')
+    await press($, 'agent')
+    expect(await replayText($)).toContain('Grep todo ✓')
+  })
+
+  test('a step shows its arguments and what it answered; a refused one, why; the pane lists as many steps as fit', async ($, on) => {
+    mock.clock(on)
+    engineDraws(on)
+    const seen = engine(on, {}, tool =>
+      tool === 'Bash' ? { result: { stdout: 'ok', stderr: '' }, text: 'tests/core.test.ts:\n 132 pass\n 0 fail' } : undefined,
+    )
+    session(on)
+
+    await $.turn.start({ text: 'run the tests', turnId: 't1' })
+    await $.tool.call({ tool: 'Bash', command: 'claude plugin test plugin', description: 'Run tests' } as never)
+    await $.tool.call({ tool: 'Read', file_path: '/work/claude-mods/plugin/src/core/band.ts' } as never)
+    await $.tool.call({ tool: 'Edit', file_path: '/work/claude-mods/refused.ts', old_string: 'a', new_string: 'b' } as never)
+    for (let i = 0; i < 5; i++) await $.tool.call({ tool: 'Grep', pattern: `p${i}` } as never)
+    await $.turn.complete({ ...DONE, turnId: 't1' } as never)
+    await $.command.run({ command: 'hud', args: 'replay' } as never)
+    expect(seen.opens.at(-1)).toMatchObject({ rows: 48, columns: 512 })
+
+    let shown = await replayText($)
+    expect(shown).toContain('command      claude plugin test plugin')
+    expect(shown).toContain('│  132 pass')
+    // Every step listed, docked.
+    expect(shown).toContain('  8 ✓ Grep')
+    await press($, 'next')
+    // A path inside the project, from its root.
+    expect(await replayText($)).toContain('file path  plugin/src/core/band.ts')
+    await press($, 'next')
+    expect(await replayText($)).toContain('│ The person refused it.')
+
+    // A third of a screen: the step, why it was refused, and the steps that fit.
+    const ui = await mountReplay($, 'terminal', { bodyColumns: 103, placement: 'inline', scroll: { offset: 0, bodyRows: 11 } })
+    shown = (await ui.findAll({ type: 'Text' })).map(t => t.text).join('')
+    expect(shown).toContain('▶ step 3 / 8')
+    expect(shown).toContain('│ The person refused it.')
+    expect((await ui.findAll({ type: 'Button' })).filter(b => b.key?.startsWith('step-'))).toHaveLength(5)
+    await ui.unmount()
+  })
+
+  test('the last replay is kept per project, and restored, marked as such, in a session that has none', async ($, on) => {
+    mock.clock(on)
+    engineDraws(on)
+    engine(on)
+    session(on)
+    const kept: Record<string, unknown> = {}
+    on('store.set', (_$, e) => {
+      kept[e.key] = e.value
+      return { value: undefined } as never
+    })
+
+    await $.turn.start({ text: 'look', turnId: 't1' })
+    await $.tool.call({ tool: 'Read', file_path: '/w/a.ts' } as never)
+    await $.turn.complete({ ...DONE, turnId: 't1' } as never)
+    expect(kept['replay:/work/claude-mods']).toMatchObject({ sessionId: '11fa1a35-c235-406a', turn: 1, steps: [{ tool: 'Read', detail: 'a.ts' }] })
+  })
+
+  test('a session with no replay of its own opens the project’s last one, from an earlier session', async ($, on) => {
+    mock.clock(on)
+    engineDraws(on)
+    engine(on)
+    session(on)
+    const earlier = {
+      sessionId: 'an-earlier-session',
+      turn: 3,
+      task: 'fix the band',
+      scene: 'cat',
+      startedAt: 0,
+      endedAt: 9_000,
+      outcome: 'answer',
+      steps: [{ callId: 'c1', tool: 'Edit', detail: 'band.ts', startedAt: 1_000, endedAt: 2_000, isError: false, added: 4, removed: 1 }],
+      agents: {},
+    }
+    on('store.get', (_$, e) => ({ value: e.key === 'replay:/work/claude-mods' ? earlier : undefined }) as never)
+
+    expect(await $.command.run({ command: 'hud', args: 'replay' } as never)).toMatchObject({ text: 'Replay of turn 3 from an earlier session: 1 step.' })
+    expect(await replayText($)).toContain('Edit band.ts +4 −1 ✓')
+  })
+
+  test('past the store’s room, the replay is kept without its diffs', async ($, on) => {
+    const clock = mock.clock(on)
+    engineDraws(on)
+    engine(on, { '/w/a.ts': 'one\ntwo\n' })
+    session(on)
+    let kept: unknown
+    on('store.set', (_$, e) => {
+      if (JSON.stringify(e.value).includes('"diff"')) return { deny: 'The store is over 4 MiB.' } as never
+      kept = e.value
+      return { value: undefined } as never
+    })
+
+    await $.turn.start({ text: 'fix it', turnId: 't1' })
+    await $.tool.call({ tool: 'Edit', file_path: '/w/a.ts', old_string: 'two', new_string: 'TWO' } as never)
+    await $.turn.complete({ ...DONE, turnId: 't1' } as never)
+    // The refused write and the one that follows it run after the turn's end.
+    await clock.advance(1)
+    expect(kept).toMatchObject({ steps: [{ tool: 'Edit', added: 1, removed: 1 }] })
+    expect(JSON.stringify(kept)).not.toContain('"diff"')
+  })
+
+  test('a turn that calls no tool keeps the last replay; before any, there is nothing to replay; the desktop shows the same', async ($, on) => {
+    mock.clock(on)
+    engineDraws(on)
+    engine(on)
+
+    expect(await $.command.run({ command: 'hud', args: 'replay' } as never)).toMatchObject({
+      text: 'Nothing to replay yet: a turn that calls tools can be replayed once it ends.',
+    })
+    await $.turn.start({ text: 'look', turnId: 't1' })
+    await $.tool.call({ tool: 'Read', file_path: '/w/a.ts' } as never)
+    await $.turn.complete({ ...DONE, turnId: 't1' } as never)
+    await $.turn.start({ text: 'thanks', turnId: 't2' })
+    await $.turn.complete({ ...DONE, turnId: 't2' } as never)
+
+    // The hint is for the turn just ended; the command still finds turn 1.
+    expect(await bandText($)).not.toContain('replay')
+    expect(await $.command.run({ command: 'hud', args: 'replay' } as never)).toMatchObject({ text: 'Replay of turn 1: 1 step.' })
+    expect(await replayText($, 'desktop')).toContain('▶ step 1 / 1')
+  })
+})

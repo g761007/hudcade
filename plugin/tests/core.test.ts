@@ -1,10 +1,30 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import type { Hud } from '../types'
+import type { Hud, Replay, ReplayStep } from '../types'
 import { agentSummary, buildBand, displayWidth, paneRows, rowText } from '../src/core/band'
 import { parseEnvFile, resolveConfig } from '../src/core/config'
 import { bar, clock, compactDuration, modelLabel, msUntil, parseTzOffset, preciseDuration, sanitize, sparkline, tokens, toolDetail, wallClock } from '../src/core/format'
 import { cleanRecap, recapRequest } from '../src/core/recap'
+import { applyEdit, diffSource, editHunks, takeLines } from '../src/core/diff'
+import {
+  DIFF_LINES,
+  addStep,
+  callFields,
+  callOutput,
+  closeAgent,
+  closeSteps,
+  diffView,
+  lineOf,
+  ownsAgent,
+  replayLines,
+  replayView,
+  stepChange,
+  stepIndex,
+  stepList,
+  stepWithDiff,
+  updateStep,
+  wrap,
+} from '../src/core/replay'
 import { SCENE_NAMES, SCENE_ROWS, pickScene, renderScene } from '../src/core/scenes'
 import { base64 } from '../src/core/scenes/canvas'
 import { turnFacts } from '../src/core/spinner'
@@ -873,5 +893,302 @@ describe('agent views', () => {
     expect(sparkline([0, 2, 14])).toBe('▁▂█')
     expect(sparkline([5, 5])).toBe('▁▁')
     expect(sparkline([])).toBe('')
+  })
+})
+
+describe('edit diffs', () => {
+  const file = (n: number) => Array.from({ length: n }, (_, i) => `line ${i + 1}`).join('\n') + '\n'
+
+  test('one changed line: a hunk with three lines of context each side, numbered from the file', () => {
+    const before = file(20)
+    const hunks = editHunks(before, before.replace('line 10\n', 'line ten\n'))
+    expect(diffSource(hunks)).toBe(['@@ -7,7 +7,7 @@', ' line 7', ' line 8', ' line 9', '-line 10', '+line ten', ' line 11', ' line 12', ' line 13'].join('\n'))
+  })
+
+  test('changes far apart get a hunk each; changes close together share one', () => {
+    const before = file(30)
+    const far = editHunks(before, before.replace('line 3\n', 'x\n').replace('line 25\n', 'y\n'))
+    // Each: up to three lines either side, the removed line and the added one.
+    expect(far.map(h => [h.oldStart, h.lines.length])).toEqual([[1, 7], [22, 8]])
+    const near = editHunks(before, before.replace('line 10\n', 'x\n').replace('line 16\n', 'y\n'))
+    expect(near).toHaveLength(1)
+    expect(diffSource(near).split('\n')[0]).toBe('@@ -7,13 +7,13 @@')
+  })
+
+  test('a new file is all added; an unchanged one has no hunks', () => {
+    expect(diffSource(editHunks('', 'a\nb\n'))).toBe('@@ -0,0 +1,2 @@\n+a\n+b')
+    expect(editHunks(file(5), file(5))).toEqual([])
+  })
+
+  test('an Edit replaces its text once, or everywhere with replace_all; text not in the file means it will fail', () => {
+    expect(applyEdit('a b a', 'a', 'c', false)).toBe('c b a')
+    expect(applyEdit('a b a', 'a', 'c', true)).toBe('c b c')
+    expect(applyEdit('a b a', 'x', 'c', false)).toBeUndefined()
+    // The new text is taken as written, `$&` and all.
+    expect(applyEdit('a', 'a', '$&$&', false)).toBe('$&$&')
+    expect(applyEdit('', '', 'new', false)).toBe('new')
+    expect(applyEdit('x', '', 'y', false)).toBeUndefined()
+  })
+
+  test('a long file costs only its changed stretch; a rewrite too large to match shows as removed, then added', () => {
+    const big = file(5_000)
+    const one = editHunks(big, big.replace('line 2500\n', 'changed\n'))
+    expect(one).toHaveLength(1)
+    expect(one[0]!.oldStart).toBe(2_497)
+    const a = Array.from({ length: 2_000 }, (_, i) => `a ${i}`).join('\n')
+    const b = Array.from({ length: 2_000 }, (_, i) => `b ${i}`).join('\n')
+    const rewrite = editHunks(a, b)
+    expect(rewrite[0]!.lines.slice(1_999, 2_001)).toEqual(['-a 1999', '+b 0'])
+  })
+
+  test('cut short, a hunk’s header counts the lines it keeps, so it still parses', () => {
+    const before = file(20)
+    const { hunks, more } = takeLines(editHunks(before, before.replace('line 10\n', 'line ten\n')), 4)
+    expect(more).toBe(4)
+    expect(diffSource(hunks)).toBe(['@@ -7,4 +7,3 @@', ' line 7', ' line 8', ' line 9', '-line 10'].join('\n'))
+  })
+
+  test('a step keeps the whole change’s counts and at most DIFF_LINES of its lines', () => {
+    const change = stepChange(editHunks('', file(DIFF_LINES + 100)))
+    expect(change).toMatchObject({ added: DIFF_LINES + 100, removed: 0, diffMore: 100 })
+    expect(change.diff![0]!.lines).toHaveLength(DIFF_LINES)
+  })
+})
+
+describe('turn replay', () => {
+  const step = (over: Partial<ReplayStep>): ReplayStep => ({ callId: 'c', tool: 'Read', detail: 'band.ts', startedAt: 0, endedAt: 1_000, isError: false, ...over })
+  const replay = (steps: ReplayStep[], over: Partial<Replay> = {}): Replay => ({
+    turn: 7,
+    task: 'rename greet to welcome',
+    scene: 'robot',
+    startedAt: 0,
+    endedAt: 135_000,
+    outcome: 'answer',
+    steps,
+    agents: {},
+    ...over,
+  })
+  const text = (segs: { text: string }[]) => segs.map(s => s.text).join('')
+  const main = (r: Replay) => lineOf(r, undefined)
+  const EXPLORE = { agentId: 'ag1', type: 'Explore', description: 'find usages' }
+
+  test('the step shown is held to the line; one past the last is its summary', () => {
+    const r = replay([step({}), step({})])
+    expect(stepIndex(main(r), 9)).toBe(2)
+    expect(stepIndex(main(r), -3)).toBe(0)
+  })
+
+  test('a step is noted as its call starts and given its outcome as it ends; an agent’s calls go on its own track', () => {
+    let r = replay([], { endedAt: undefined })
+    r = addStep(r, step({ callId: 'a1', tool: 'Agent', detail: 'find usages', endedAt: undefined }))
+    expect(ownsAgent(r, 'ag1')).toBe(false)
+    // agent.spawn links the Agent call to its agent.
+    r = updateStep(r, 'a1', { agentId: 'ag1' })
+    expect(ownsAgent(r, 'ag1')).toBe(true)
+    r = addStep(r, step({ callId: 'g1', tool: 'Grep', detail: 'greet', endedAt: undefined }), EXPLORE)
+    expect(r.steps).toHaveLength(1)
+    expect(r.agents.ag1).toMatchObject({ type: 'Explore', description: 'find usages' })
+    r = updateStep(r, 'g1', { endedAt: 2_000, isError: true })
+    expect(r.agents.ag1!.steps[0]).toMatchObject({ endedAt: 2_000, isError: true })
+    expect(updateStep(r, 'nope', { isError: true })).toBe(r)
+
+    // The turn ends while its Agent call runs: that step was cut off. The
+    // agent's track runs on until its report.
+    expect(closeSteps(r.steps, 9_000)[0]).toMatchObject({ endedAt: 9_000, isUnfinished: true })
+    r = addStep(r, step({ callId: 'g2', endedAt: undefined }), EXPLORE)
+    expect(closeAgent(r, 'ag1', 9_500).agents.ag1!.steps.map(s => s.isUnfinished)).toEqual([undefined, true])
+  })
+
+  test('a call’s arguments: the ones that matter for its tool, paths from the project’s root', () => {
+    const root = '/work/claude-mods'
+    expect(callFields('Bash', { tool: 'Bash', description: 'Run tests', command: 'npm  test', run_in_background: false }, root)).toEqual([
+      { label: 'description', value: 'Run tests' },
+      { label: 'command', value: 'npm test' },
+    ])
+    expect(callFields('Read', { file_path: `${root}/plugin/a.ts`, limit: 40 }, root)).toEqual([
+      { label: 'file path', value: 'plugin/a.ts' },
+      { label: 'limit', value: '40' },
+    ])
+    expect(callFields('Read', { file_path: '/etc/hosts' }, root)).toEqual([{ label: 'file path', value: '/etc/hosts' }])
+    // Another tool: its first plain arguments, not the hook's own fields.
+    expect(callFields('mcp__github__create_issue', { tool: 'x', tool_use_id: 'tu', title: 'Bug', body: 'b', labels: ['a'] }, root)).toEqual([
+      { label: 'title', value: 'Bug' },
+      { label: 'body', value: 'b' },
+    ])
+  })
+
+  test('what a call answered: terminal codes out, indentation kept, cut to forty lines', () => {
+    expect(callOutput('\u001b[32mok\u001b[0m\n  two passed\n\n')).toBe('ok\n  two passed')
+    expect(callOutput('  \n')).toBeUndefined()
+    expect(callOutput(undefined)).toBeUndefined()
+    const long = callOutput(Array.from({ length: 50 }, (_, i) => `line ${i}`).join('\n'))!
+    expect(long.split('\n')).toHaveLength(41)
+    expect(long.endsWith('line 39\n…')).toBe(true)
+  })
+
+  test('text wraps at spaces within the width, CJK counted two columns', () => {
+    expect(wrap('the quick brown fox jumps', 10)).toEqual(['the quick', 'brown fox', 'jumps'])
+    for (const line of wrap('執行全部的單元測試並回報結果 then more words', 12)) expect(displayWidth(line)).toBeLessThanOrEqual(12)
+    expect(wrap('abc', 0)).toEqual(['a', 'b', 'c'])
+  })
+
+  test('a step shows its tool, file, lines, outcome and time, and where it fell in the turn', () => {
+    const r = replay([
+      step({}),
+      step({ tool: 'Edit', detail: 'band.ts', startedAt: 42_000, endedAt: 45_000, added: 12, removed: 3 }),
+      step({ tool: 'Bash', detail: 'run the tests', startedAt: 60_000, endedAt: 120_000, isError: true }),
+    ])
+    const lines = replayLines(r, main(r), 1, 60)
+    expect(text(lines.header)).toBe('▶ step 2 / 3 · turn 7 · 0:42 / 2:15')
+    expect(text(lines.step)).toBe('Edit band.ts +12 −3 ✓ 0:03')
+    expect(text(replayLines(r, main(r), 2, 60).step)).toBe('Bash run the tests ✗ 1:00')
+  })
+
+  test('in a narrow pane the step’s detail gives way, so its tool, outcome and time stay whole', () => {
+    const line = (detail: string) => {
+      const r = replay([step({ tool: 'Bash', detail, endedAt: 2_000 })])
+      return text(replayLines(r, main(r), 0, 30).step)
+    }
+    expect(line('List TypeScript files in the scenes folder')).toBe('Bash List TypeScript f… ✓ 0:02')
+    const wide = line('執行全部的單元測試並回報結果')
+    expect(wide.endsWith(' ✓ 0:02')).toBe(true)
+    expect(displayWidth(wide)).toBeLessThanOrEqual(30)
+  })
+
+  test('the summary: how the turn ended, its steps, failures, unfinished ones, agents, and the lines of the edits that went through', () => {
+    const r = replay(
+      [
+        step({ tool: 'Edit', added: 12, removed: 3 }),
+        step({ tool: 'Bash', isError: true }),
+        // Refused: its change never happened.
+        step({ tool: 'Write', added: 30, removed: 0, isError: true }),
+        step({ tool: 'Bash', isUnfinished: true }),
+        step({ tool: 'Agent', agentId: 'ag1' }),
+      ],
+      { outcome: 'aborted', agents: { ag1: { type: 'Explore', description: 'find usages', steps: [step({})] } } },
+    )
+    const lines = replayLines(r, main(r), 5, 80)
+    expect(text(lines.header)).toBe('⏹ interrupted · turn 7 · 2:15')
+    expect(text(lines.step)).toBe('5 steps · 2 failed · 1 unfinished · 1 agent +12 −3')
+    expect(text(lines.task)).toBe('“rename greet to welcome”')
+  })
+
+  test('on an agent’s track the lines name the agent and its task', () => {
+    const r = replay([step({ tool: 'Agent', agentId: 'ag1' })], {
+      agents: { ag1: { type: 'Explore', description: 'find usages', steps: [step({ tool: 'Grep', detail: 'greet', startedAt: 2_000, endedAt: 3_000 })] } },
+    })
+    const track = lineOf(r, 'ag1')
+    const lines = replayLines(r, track, 0, 60)
+    expect(text(lines.header)).toBe('▶ step 1 / 1 · Explore · 0:02 / 2:15')
+    expect(text(lines.step)).toBe('Grep greet ✓ 0:01')
+    expect(text(lines.task)).toBe('“find usages”')
+    expect(text(replayLines(r, track, 1, 60).header)).toBe('■ end · Explore')
+    // An agent no longer in the replay: the main line.
+    expect(lineOf(r, 'gone').steps).toBe(r.steps)
+  })
+
+  test('the strip marks the current step, the failed ones and the unfinished ones, and follows a long line', () => {
+    const short = replay([step({}), step({ isError: true }), step({ isUnfinished: true })])
+    const cells = replayLines(short, main(short), 0, 60).strip
+    expect(text(cells)).toBe('■ ▪ ▪ ')
+    expect(cells.map(c => c.color)).toEqual(['claude', 'error', 'warning'])
+
+    const long = replay(Array.from({ length: 40 }, () => step({})))
+    expect(text(replayLines(long, main(long), 20, 24).strip)).toBe('… ▪ ▪ ▪ ▪ ▪ ■ ▪ ▪ ▪ ▪ …')
+    expect(text(replayLines(long, main(long), 0, 24).strip).startsWith('■ ')).toBe(true)
+  })
+
+  test('the list: the stretch around the current step, an edit’s lines, an agent’s steps, a running call, times aligned', () => {
+    const r = replay(
+      [
+        step({ tool: 'Read', detail: 'replay.ts' }),
+        step({ tool: 'Edit', detail: '跑測試 band.ts', endedAt: 3_000, added: 12, removed: 3 }),
+        step({ tool: 'Agent', detail: 'find usages', agentId: 'ag1', endedAt: 61_000 }),
+        step({ tool: 'mcp__github__create_issue', detail: '', endedAt: undefined }),
+        step({ tool: 'Grep', detail: 'greet' }),
+      ],
+      { agents: { ag1: { type: 'Explore', description: 'find usages', steps: [step({}), step({})] } } },
+    )
+    const list = stepList(r, main(r), 2, 44, 3)
+    expect(list.map(row => row.index)).toEqual([1, 2, 3])
+    expect(list.map(row => text(row.segs))).toEqual([
+      '  2 ✓ Edit           跑測試 ban… +12 −3 0:03',
+      '▸ 3 ✓ Agent          find usages    ⤷ 2 1:01',
+      '  4 ◌ github:create…                       …',
+    ])
+    for (const row of list) expect(displayWidth(text(row.segs))).toBe(44)
+    expect(list[1]!.segs[0]!.bold).toBe(true)
+    expect(list[2]!.segs[2]!.dim).toBe(true)
+    // On the summary, the last steps, all passed.
+    expect(stepList(r, main(r), 5, 44, 2).map(row => row.index)).toEqual([3, 4])
+  })
+
+  test('the pane shows the step whole: the ask, its arguments wrapped, what it answered, and as many steps as fit', () => {
+    const bash = step({
+      tool: 'Bash',
+      detail: 'Run the tests',
+      fields: [
+        { label: 'description', value: 'Run the tests' },
+        { label: 'command', value: 'claude plugin test plugin 2>&1 | grep -E "pass|fail"' },
+      ],
+      output: 'tests/core.test.ts:\n 132 pass\n 0 fail',
+    })
+    const r = replay([step({ detail: 'a.ts' }), bash, ...Array.from({ length: 6 }, () => step({}))], { task: 'make the replay pane show more of each step' })
+    const tall = replayView(r, main(r), 1, 40, 30)
+    expect(tall.task.map(text)).toEqual(['“make the replay pane show more of each', 'step”'])
+    expect(tall.details.map(text)).toEqual([
+      'description  Run the tests',
+      'command      claude plugin test plugin',
+      '             2>&1 | grep -E "pass|fail"',
+      '│ tests/core.test.ts:',
+      '│  132 pass',
+      '│  0 fail',
+    ])
+    expect(tall.list).toHaveLength(8)
+
+    // A third of a screen: three steps stay listed, the answer giving way first.
+    const short = replayView(r, main(r), 1, 40, 9)
+    expect(short.list).toHaveLength(3)
+    expect(short.details.map(text)).toEqual([
+      'description  Run the tests',
+      'command      claude plugin test plugin',
+      '             2>&1 | grep -E "pass|fail"',
+    ])
+    // One row for the ask: its start, not a count of what is left.
+    expect(short.task.map(text)).toEqual(['“make the replay pane show more of each …'])
+    // Two rows more, and the answer has its first lines back.
+    expect(replayView(r, main(r), 1, 40, 11).details.map(text).slice(3)).toEqual(['│ tests/core.test.ts:', '  … 2 more lines'])
+  })
+
+  test('the summary lists the files the line’s edits changed', () => {
+    const r = replay([
+      step({ tool: 'Edit', detail: 'a.ts', fields: [{ label: 'file path', value: 'src/a.ts' }], added: 2, removed: 1 }),
+      step({ tool: 'Edit', detail: 'a.ts', fields: [{ label: 'file path', value: 'src/a.ts' }], added: 3, removed: 0 }),
+      step({ tool: 'Write', detail: 'b.ts', fields: [{ label: 'file path', value: 'src/b.ts' }], added: 9, removed: 0, isError: true }),
+    ])
+    expect(replayView(r, main(r), 3, 40, 20).details.map(text)).toEqual(['src/a.ts +5 −1'])
+  })
+
+  test('the diff: the steps that have one, and a change cut to the rows', () => {
+    const hunks = editHunks('', 'a\nb\nc\nd\n')
+    const r = replay([step({ diff: hunks }), step({}), step({ diff: hunks, diffMore: 5 })])
+    expect(stepWithDiff(r.steps, 0, 1)).toBe(2)
+    expect(stepWithDiff(r.steps, 2, 1)).toBeUndefined()
+    expect(stepWithDiff(r.steps, 1, -1)).toBe(0)
+    expect(diffView(r.steps[2]!, 2)).toEqual({ source: '@@ -0,0 +1,2 @@\n+a\n+b', more: 7 })
+  })
+
+  test('the idle band offers the replay of the turn that just ended, drops it first when narrow, and no other', () => {
+    const OPTIONS = { warnPercent: 60, criticalPercent: 80 }
+    let h = completeTurn(startTurn(emptyHud('p'), 0), 5_000, 5_000)
+    // One kept from an earlier session, of a turn with the same number.
+    expect(rowText(buildBand({ ...h, replay: replay([step({})], { turn: 1, endedAt: 99_000 }) }, 6_000, 200, OPTIONS)[2]!)).not.toContain('replay')
+    h = { ...h, replay: replay([step({}), step({})], { turn: h.turn.count, endedAt: h.turn.endedAt }) }
+    const activity = (h: Hud, columns: number) => rowText(buildBand(h, 6_000, columns, OPTIONS)[2]!)
+    expect(activity(h, 200)).toContain('▶ /hud replay (2 steps)')
+    expect(activity(h, 40)).not.toContain('replay')
+    expect(activity(h, 40)).toContain('idle · turn 1')
+    const next = completeTurn(startTurn(h, 10_000), 1_000, 11_000)
+    expect(activity(next, 200)).not.toContain('replay')
   })
 })

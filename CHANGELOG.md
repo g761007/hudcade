@@ -5,6 +5,18 @@ All notable changes to hudcade are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Turn replay: `/hud replay` steps through the last turn that called tools:
+  each call's tool, its arguments in full, outcome and time, the start of
+  what it answered, and the lines an edit changed. `d` opens an Edit's or Write's diff,
+  noted from the file before the call ran, so a refused one shows too. `a`
+  goes into a subagent's own track of calls; `b` or Escape goes back. The
+  last replay of each project is kept on disk, so it outlives a restart. The
+  idle band offers it once such a turn ends.
+
 ## [0.3.0] - 2026-11-20
 
 ### Removed

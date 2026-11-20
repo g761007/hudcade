@@ -212,6 +212,12 @@ function activityRow(h: Hud, now: number, isSpinning: boolean): Group[] {
       const took = turn.lastDurationMs !== undefined ? ` (${clock(turn.lastDurationMs)})` : ''
       groups.push({ priority: 2, side: 'left', segs: [{ text: `${at(turn.startedAt)}–${at(turn.endedAt)}${took}`, dim: true }] })
     }
+    // The turn that just ended called tools: it can be replayed. (A replay
+    // restored from an earlier session ended at another time.)
+    if (h.replay && h.replay.turn === turn.count && h.replay.endedAt === turn.endedAt) {
+      const n = h.replay.steps.length
+      groups.push({ priority: 3, side: 'left', segs: [{ text: `▶ /hud replay (${n} step${n === 1 ? '' : 's'})`, dim: true }] })
+    }
   } else {
     const elapsed = turn.startedAt !== undefined && !isSpinning ? ` ${clock(now - turn.startedAt)}` : ''
     const status: Seg =

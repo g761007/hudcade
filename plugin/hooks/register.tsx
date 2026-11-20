@@ -8,11 +8,30 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, Timer } from 'claude-code'
 
-import type { AgentRun, Hud, SceneName } from '../types'
+import type { AgentRun, Hud, Replay, ReplayStep, SceneName } from '../types'
 import { agentSummary, buildBand, paneRows, type Seg } from '../src/core/band'
 import { createRuntime, parseEnvFile, resolveConfig, type Layer, type Runtime } from '../src/core/config'
-import { basename, clock, modelLabel, parseTzOffset, tokens, toolDetail, toolLabel, truncate, usd } from '../src/core/format'
+import { basename, clock, modelLabel, parseTzOffset, sanitize, tokens, toolDetail, toolLabel, truncate, usd } from '../src/core/format'
 import { cleanRecap, recapRequest, type RecapStep } from '../src/core/recap'
+import { applyEdit, editHunks } from '../src/core/diff'
+import {
+  addStep,
+  callFields,
+  callOutput,
+  closeAgent,
+  closeSteps,
+  diffView,
+  hasCall,
+  lineOf,
+  ownsAgent,
+  replayLines,
+  replayView,
+  stepChange,
+  stepIndex,
+  stepWithDiff,
+  updateStep,
+  type Line,
+} from '../src/core/replay'
 import { SCENE_ROWS, SCENES, modeLabel, modeOf, pickScene, renderScene, type SpinnerMode } from '../src/core/scenes'
 import { turnFacts } from '../src/core/spinner'
 import {
@@ -55,6 +74,8 @@ import { agentList, buildMessage, resolveLanguage, summarize, type NotifyKind, t
 
 // The one session value the drawings read: a write redraws the band and the spinner.
 const hudAtom = atom({ plugin: 'hudcade', key: 'hud' } as const, emptyHud(''))
+// The running turn's steps, kept as hud.replay once the turn ends; null between turns.
+const draftAtom = atom({ plugin: 'hudcade', key: 'draft' } as const, null as Replay | null)
 
 const PROJECT_FILES = ['claude-mods.json', 'claude-mods.local.json'] as const
 const GIT_THROTTLE_MS = 3_000
@@ -63,6 +84,7 @@ const AGENT_SYNC_MS = 15_000
 const FRAME_MS = 80
 const SPINNER_TEXT_COLUMNS = 36
 const AGENTS_PANE = 'hudcade-agents'
+const REPLAY_PANE = 'hudcade-replay'
 // While idle, the band redraws this often for the cache countdown.
 const IDLE_REDRAW_MS = 15_000
 // An ask the mode gives to no classifier within this time is the person's.
@@ -122,6 +144,13 @@ let lastRecapAt = Number.NEGATIVE_INFINITY
 // Background agents seen running while no turn ran, by row key: what each is.
 const awaitedAgents = new Map<string, string>()
 let agentsSettleTimer: Timer | undefined
+// The replay pane: the agents' tracks the person went into from the main
+// line, the step shown on each line, and whether its diff is open.
+let replayPath: string[] = []
+let replayCursor: number[] = [0]
+let isReplayDiff = false
+// The project's folder, so the replay shows paths inside it from there.
+let projectRoot = ''
 
 // ── Configuration ─────────────────────────────────────────────────────────
 
@@ -492,6 +521,123 @@ async function runRecap($: EngineInterface): Promise<void> {
   }
 }
 
+// ── Turn replay ───────────────────────────────────────────────────────────
+
+// A step starts: on the running turn's replay, or, for an agent that turn
+// left running in the background, on the stored one. An agent no Agent call
+// of either started (a workflow's, a fork) has no track.
+async function recordStart($: EngineInterface, h: Hud, step: ReplayStep, agentId: string | undefined): Promise<void> {
+  if (agentId === undefined) {
+    await update($, draftAtom, d => (d ? addStep(d, step) : d))
+    return
+  }
+  const run = h.agents.find(a => a.agentId === agentId)
+  const agent = { agentId, type: run?.type ?? 'agent', description: run?.description ?? '' }
+  const draft = await read($, draftAtom)
+  if (draft && ownsAgent(draft, agentId)) await update($, draftAtom, d => (d ? addStep(d, step, agent) : d))
+  else if (h.replay && ownsAgent(h.replay, agentId)) await patch($, h => (h.replay ? { ...h, replay: addStep(h.replay, step, agent) } : h))
+}
+
+// A recorded step changes (its outcome, its agent), wherever it was recorded.
+async function recordChange($: EngineInterface, callId: string, change: Partial<ReplayStep>): Promise<void> {
+  const draft = await read($, draftAtom)
+  if (draft && hasCall(draft, callId)) {
+    await update($, draftAtom, d => (d ? updateStep(d, callId, change) : d))
+    return
+  }
+  const { replay } = await snapshot($)
+  if (replay && hasCall(replay, callId)) await patch($, h => (h.replay ? { ...h, replay: updateStep(h.replay, callId, change) } : h))
+}
+
+// The change an Edit or Write call asks for, read from the file before the
+// call runs, so a refused or failed one shows what it meant too.
+async function proposedChange($: EngineInterface, tool: string, input: Record<string, unknown>): Promise<Partial<ReplayStep>> {
+  if ((tool !== 'Edit' && tool !== 'Write') || typeof input.file_path !== 'string') return {}
+  try {
+    const path = input.file_path
+    const before = (await $.fs.exists(path)) ? await $.fs.read(path) : ''
+    const oldString = String(input.old_string ?? '')
+    const newString = String(input.new_string ?? '')
+    const after = tool === 'Write' ? String(input.content ?? '') : applyEdit(before, oldString, newString, input.replace_all === true)
+    // An Edit whose text is not in the file fails; its own two texts show what it meant.
+    return stepChange(after === undefined ? editHunks(oldString, newString) : editHunks(before, after))
+  } catch {
+    return {}
+  }
+}
+
+// The last replay of the project is kept in the store too, so it outlives a
+// restart, a /clear or the conversation moving on to a new session. Past the
+// store's room, it is kept without its diffs.
+async function saveReplay($: EngineInterface, replay: Replay): Promise<void> {
+  try {
+    const key = `replay:${await $.session.root()}`
+    try {
+      await $.store.set(key, replay)
+    } catch {
+      await $.store.set(key, JSON.parse(JSON.stringify(replay, (field, value) => (field === 'diff' ? undefined : value))))
+    }
+  } catch {
+    // The session's own replay still stands.
+  }
+}
+
+async function storedReplay($: EngineInterface): Promise<Replay | undefined> {
+  try {
+    const value = (await $.store.get(`replay:${await $.session.root()}`)) as Replay | undefined
+    return value && Array.isArray(value.steps) ? { ...value, agents: value.agents ?? {} } : undefined
+  } catch {
+    return undefined
+  }
+}
+
+// The pane opens on the main line's first step.
+function resetReplay(): void {
+  replayPath = []
+  replayCursor = [0]
+  isReplayDiff = false
+}
+
+// The person moves to step `index` of the line shown (`steps` is its summary).
+function moveReplay($: EngineInterface, index: number, steps: number): void {
+  replayCursor[replayCursor.length - 1] = Math.max(0, Math.min(index, steps))
+  $.ui.invalidate('ui.render')
+}
+
+// `d`: the change of the step shown, or of the nearest step with one.
+function openDiff($: EngineInterface, line: Line, index: number): void {
+  const target = line.steps[index]?.diff?.length ? index : (stepWithDiff(line.steps, index, 1) ?? stepWithDiff(line.steps, index, -1))
+  if (target === undefined) return
+  isReplayDiff = true
+  moveReplay($, target, line.steps.length)
+}
+
+// `a`: into the track of the agent the step's Agent call started.
+function enterAgent($: EngineInterface, agentId: string): void {
+  replayPath.push(agentId)
+  replayCursor.push(0)
+  isReplayDiff = false
+  $.ui.invalidate('ui.render')
+}
+
+// `b`, Escape: out of a diff, then out of an agent's track; false on the main line.
+function backReplay($: EngineInterface): boolean {
+  if (isReplayDiff) {
+    isReplayDiff = false
+  } else if (replayPath.length > 0) {
+    replayPath.pop()
+    replayCursor.pop()
+  } else {
+    return false
+  }
+  $.ui.invalidate('ui.render')
+  return true
+}
+
+// The close button; Escape or the pane's close mark arrive at ui.close instead.
+function closeReplay($: EngineInterface): void {
+  void $.ui.close({ id: REPLAY_PANE }).catch(() => undefined)
+}
 
 export const register: Register = (on, options) => {
   values = options as Record<string, unknown>
@@ -507,8 +653,9 @@ export const register: Register = (on, options) => {
     }
     await $.command.register({
       name: 'hud',
-      description: 'hudcade status; `/hud agents` opens the agents pane; `/hud test-notify` sends a test Telegram message',
-      argumentHint: '[agents|test-notify]',
+      description:
+        'hudcade status; `/hud agents` opens the agents pane; `/hud replay` replays the last turn that called tools; `/hud test-notify` sends a test Telegram message',
+      argumentHint: '[agents|replay|test-notify]',
     })
     // Each fact is read on its own: one that fails must not blank the others,
     // and its reason shows in /hud.
@@ -592,6 +739,34 @@ export const register: Register = (on, options) => {
       const { isPlaced } = await $.ui.open({ id: AGENTS_PANE, title: 'hudcade · agents' })
       return { text: isPlaced ? 'Agents pane opened.' : 'The agents pane opens once the window has room for it.' }
     }
+    if (e.args.trim() === 'replay') {
+      let { replay } = await snapshot($)
+      if (!replay) {
+        const kept = await storedReplay($)
+        if (kept) await patch($, h => ({ ...h, replay: kept }))
+        replay = kept
+      }
+      if (!replay) return { text: 'Nothing to replay yet: a turn that calls tools can be replayed once it ends.' }
+      const sessionId = await $.session.id().catch(() => undefined)
+      const from = replay.sessionId !== undefined && replay.sessionId !== sessionId ? ' from an earlier session' : ''
+      resetReplay()
+      const { isPlaced } = await $.ui.open({
+        id: REPLAY_PANE,
+        title: 'hudcade · replay',
+        focus: true,
+        closeOnEscape: true,
+        // As tall and, docked, as wide as Claude Code lets a pane go: a third
+        // of the screen inline, 45% of the terminal docked.
+        rows: 48,
+        columns: 512,
+      })
+      const n = replay.steps.length
+      return {
+        text: isPlaced
+          ? `Replay of turn ${replay.turn}${from}: ${n} step${n === 1 ? '' : 's'}.`
+          : 'The replay pane opens once the window has room for it.',
+      }
+    }
     return { text: statusText(runtime, await snapshot($)) }
   })
 
@@ -618,6 +793,8 @@ export const register: Register = (on, options) => {
     toolsAtStart = h.tools.total
     scene = pickScene(runtime.config.spinnerScene, lastScene, Math.random())
     lastScene = scene
+    const sessionId = await $.session.id().catch(() => undefined)
+    await update($, draftAtom, () => ({ sessionId, turn: h.turn.count, task: truncate(sanitize(e.text), 2_000), scene, startedAt: now, steps: [], agents: {} }))
     spinnerMode = undefined
     stopFrames()
     if (runtime.config.spinner) frameTimer = $.clock.every(FRAME_MS, () => void paintFrame($))
@@ -673,7 +850,16 @@ export const register: Register = (on, options) => {
   on('turn.complete', async ($, e, next) => {
     if (!e.agentId) {
       const now = await $.clock.now()
-      const h = await patch($, h => completeTurn(h, e.durationMs, now, e.reason))
+      // A turn that called no tool leaves the last replay as it was.
+      const draft = await read($, draftAtom)
+      await update($, draftAtom, () => null)
+      const h = await patch($, h => {
+        const done = completeTurn(h, e.durationMs, now, e.reason)
+        if (!draft?.steps.length) return done
+        // A main-loop call still running was cut off; an agent's track runs on.
+        return { ...done, replay: { ...draft, endedAt: now, outcome: e.reason, steps: closeSteps(draft.steps, now) } }
+      })
+      if (draft?.steps.length && h.replay) void saveReplay($, h.replay)
       syncTicker($, h.agents.some(a => a.status === 'running'))
       watchBackgroundAgents($, h)
       stopFrames()
@@ -707,7 +893,7 @@ export const register: Register = (on, options) => {
     const now = await $.clock.now()
     const input = e as unknown as Record<string, unknown>
     const id = e.tool_use_id ?? `${e.tool}:${now}`
-    await patch($, h => {
+    const atStart = await patch($, h => {
       let state = startTool(h, { id, tool: e.tool, detail: toolDetail(e.tool, input), startedAt: now, agentId: e.agentId })
       if (e.tool === 'Agent') {
         state = launchAgent(state, {
@@ -721,6 +907,15 @@ export const register: Register = (on, options) => {
       }
       return state
     })
+    // The step is noted before the call runs, with its arguments and the change it asks for.
+    try {
+      projectRoot ||= await $.session.root().catch(() => '')
+      const fields = callFields(e.tool, input, projectRoot)
+      const step: ReplayStep = { callId: id, tool: e.tool, detail: toolDetail(e.tool, input), fields, startedAt: now, isError: false }
+      await recordStart($, atStart, { ...step, ...(await proposedChange($, e.tool, input)) }, e.agentId)
+    } catch {
+      // The replay never stops a call.
+    }
 
     const ran = await next(e)
 
@@ -765,6 +960,9 @@ export const register: Register = (on, options) => {
         recapSteps.push({ tool: e.tool, detail: toolDetail(e.tool, input), isError })
         scheduleRecap($, end)
       }
+      const agentId = e.tool === 'Agent' && typeof result.agentId === 'string' ? result.agentId : undefined
+      const output = callOutput(ran.deny ?? ran.text)
+      await recordChange($, id, { endedAt: end, isError, ...(output ? { output } : {}), ...(agentId ? { agentId } : {}) })
     } catch {
       // Bookkeeping never changes what the tool returned.
     }
@@ -804,6 +1002,8 @@ export const register: Register = (on, options) => {
       syncTicker($, true)
       watchBackgroundAgents($, h)
       void refreshAgents($)
+      // Its Agent call's step leads to its track from now on.
+      if (e.tool_use_id) await recordChange($, e.tool_use_id, { agentId })
     } catch {
       // Bookkeeping never changes the spawn.
     }
@@ -816,7 +1016,13 @@ export const register: Register = (on, options) => {
     const reported = await next(e)
     try {
       const now = await $.clock.now()
-      const h = await patch($, h => reportAgent(h, e.agentId, e.status, now))
+      const h = await patch($, h => {
+        const reported = reportAgent(h, e.agentId, e.status, now)
+        return reported.replay ? { ...reported, replay: closeAgent(reported.replay, e.agentId, now) } : reported
+      })
+      await update($, draftAtom, d => (d ? closeAgent(d, e.agentId, now) : d))
+      // The stored copy gets the agent's track as it ended.
+      if (h.replay && ownsAgent(h.replay, e.agentId)) void saveReplay($, h.replay)
       syncTicker($, h.turn.status !== 'idle' || h.agents.some(a => a.status === 'running'))
       watchBackgroundAgents($, h)
     } catch {
@@ -1032,6 +1238,93 @@ export const register: Register = (on, options) => {
         ))}
       </Box>
     )
+  })
+
+  // `/hud replay`: the last turn that called tools, one step at a time as the
+  // person moves through it: each step whole, its arguments and what it
+  // answered, and the steps around it. On `d` the diff an Edit or Write asked
+  // for, on `a` the own steps of the agent an Agent call started.
+  on('ui.render', { component: 'Pane', requestId: REPLAY_PANE }, async ($, e) => {
+    const { replay } = await snapshot($)
+    const { Box, Text, Button, Code } = $.ui.resolve(e)
+    if (!replay) return <Text dimColor>Nothing to replay yet.</Text>
+    // A track a newer replay no longer holds leaves the person on the main line.
+    while (replayPath.length > 0 && !replay.agents[replayPath[replayPath.length - 1]!]) {
+      replayPath.pop()
+      replayCursor.pop()
+    }
+    const line = lineOf(replay, replayPath[replayPath.length - 1])
+    const n = line.steps.length
+    const index = stepIndex(line, replayCursor[replayCursor.length - 1] ?? 0)
+    const step = line.steps[index]
+    const isDiff = isReplayDiff && (step?.diff?.length ?? 0) > 0
+    const track = step?.agentId === undefined ? undefined : replay.agents[step.agentId]
+    const { bodyColumns } = e.props
+    const room = e.props.scroll.bodyRows
+    const texts = (segs: Seg[]) =>
+      segs.map(seg => (
+        <Text color={seg.color} dimColor={seg.dim} bold={seg.bold} wrap="truncate">
+          {seg.text}
+        </Text>
+      ))
+    const row = (segs: Seg[]) => <Box flexDirection="row">{texts(segs)}</Box>
+    // In a diff, prev and next go to the steps with one.
+    const go = (direction: 1 | -1) => {
+      const to = isDiff ? stepWithDiff(line.steps, index, direction) : index + direction
+      if (to !== undefined) moveReplay($, to, n)
+    }
+    const buttons = (
+      <Box flexDirection="row" gap={2}>
+        <Button key="prev" plain hotkey="p" label="◀ prev" onPress={() => go(-1)} />
+        <Button key="next" plain hotkey="n" label="next ▶" autoFocus onPress={() => go(1)} />
+        {!isDiff && (step?.diff?.length ?? 0) > 0 && <Button key="diff" plain hotkey="d" label="diff" onPress={() => openDiff($, line, index)} />}
+        {!isDiff && track && step?.agentId && (
+          <Button key="agent" plain hotkey="a" label={`${track.type} ⤷`} onPress={() => enterAgent($, step.agentId!)} />
+        )}
+        {(isDiff || replayPath.length > 0) && <Button key="back" plain hotkey="b" label="back" onPress={() => backReplay($)} />}
+        <Button key="close" plain hotkey="c" label="close" role="dismiss" onPress={() => closeReplay($)} />
+      </Box>
+    )
+
+    if (isDiff && step) {
+      const lines = replayLines(replay, line, index, bodyColumns)
+      const { source, more } = diffView(step, Math.max(3, room - 4))
+      return (
+        <Box flexDirection="column">
+          {row(lines.header)}
+          {row(lines.step)}
+          <Code source={source} format="diff" path={step.detail} wrap="truncate-end" />
+          {more > 0 && <Text dimColor>{`… ${more} more line${more === 1 ? '' : 's'}`}</Text>}
+          {buttons}
+        </Box>
+      )
+    }
+
+    // Everything but the buttons, fitted to the pane; each listed step is pressed to move to it.
+    const view = replayView(replay, line, index, bodyColumns, room - 1)
+    return (
+      <Box flexDirection="column">
+        {row(view.header)}
+        {view.task.map(row)}
+        {row(view.step)}
+        {view.details.map(row)}
+        {view.list.map(item => (
+          <Button key={`step-${item.index}`} plain onPress={() => moveReplay($, item.index, n)}>
+            {texts(item.segs)}
+          </Button>
+        ))}
+        {view.strip && row(view.strip)}
+        {buttons}
+      </Box>
+    )
+  })
+
+  on('ui.close', async ($, e, next) => {
+    if (e.id === REPLAY_PANE) {
+      // Escape and the close mark step back out of a diff or an agent's track first.
+      if (e.origin.kind === 'person' && backReplay($)) return { value: undefined }
+    }
+    return next(e)
   })
 
   on('ui.render', { component: 'Spinner' }, async ($, e, next) => {

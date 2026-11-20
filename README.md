@@ -113,6 +113,18 @@ Next to the scene are the spinner word, the elapsed time, the effort, the curren
 
 The spinner is terminal only; the desktop app keeps its own.
 
+### Turn replay
+
+When a turn that called tools ends, the idle band offers `▶ /hud replay (8 steps)`. `/hud replay` opens a pane on the turn's first tool call. You move through the steps yourself: `n` and `p`, or press a step in the list. Past the last step is a summary: how the turn ended, its steps, failures and agents, and the lines its edits changed.
+
+For each step the pane shows its tool and file, ✓, ✗ (failed or refused) or ⏹ (still running when the turn ended), how long it took and when in the turn it ran, and what you asked. Under it are the call's arguments in full, wrapped (a command, a path from the project's root, a pattern), and the start of what it answered, or why it was refused. On the summary, the files the turn's edits changed are listed with their lines. An Edit or Write shows the lines it adds and removes (`+12 −3`); `d` opens its diff, with line numbers and highlighting, and `n` and `p` then go from one change to the next. The step and its change are noted as the call starts, read from the file as it was, so a refused or failed edit still shows what it meant to change.
+
+A subagent's calls are on a track of their own. Its Agent call's step shows how many it made (`⤷ 12`); `a` goes into that track, to move through and open diffs the same way. A background agent's calls after the turn ended join its track. `b` or Escape goes back out of a diff or a track; `c`, or Escape on the main line, closes the pane.
+
+The pane takes as much room as Claude Code gives one: docked beside a fullscreen transcript, 45% of the terminal wide and its full height; above the prompt, about a third of the screen. It fills that room: what you asked, the step's arguments and answer, and as many steps as fit (up to twenty). Short of rows, the answer gives way first, then the arguments, so that three steps stay listed. A diff takes the whole pane.
+
+A turn that called no tool leaves the last replay as it was. The last replay of each project is also kept on disk, so it outlives a restart, a `/clear` or the conversation moving to a new session: `/hud replay` opens it there, marked as from an earlier session.
+
 ### Telegram notifications
 
 ```
@@ -162,6 +174,7 @@ Commands:
 
 - `/hud`: what is switched on, where the settings came from, and what the HUD has read.
 - `/hud agents`: open the agents pane.
+- `/hud replay`: replay the last turn that called tools.
 - `/hud test-notify`: send a test Telegram message.
 
 ## How it works
