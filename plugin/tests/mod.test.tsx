@@ -336,7 +336,7 @@ describe('notify', () => {
     session(on)
     const sent: { url: string; body: string }[] = []
     on('http.fetch', (_$, e) => {
-      sent.push({ url: e.url, body: e.init?.body ?? '' })
+      sent.push({ url: e.url, body: String(e.init?.body ?? '') })
       return { value: { status: 200, ok: true, headers: {}, text: '{"ok":true}' } }
     })
     on('process.run', () => ({
@@ -366,7 +366,7 @@ describe('notify', () => {
     on('settings.read', () => ({ value: { language: 'English' } }) as never)
     const sent: string[] = []
     on('http.fetch', (_$, e) => {
-      sent.push(e.init?.body ?? '')
+      sent.push(String(e.init?.body ?? ''))
       return { value: { status: 200, ok: true, headers: {}, text: '' } }
     })
     on('turn.complete', (_$, e) => ({ text: e.answer }) as never)
